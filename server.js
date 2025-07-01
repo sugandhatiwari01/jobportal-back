@@ -66,15 +66,11 @@ mongoose
     gfs = new GridFSBucket(mongoose.connection.db, {
       bucketName: 'uploads',
     });
-
-    const PORT = process.env.PORT || 5000;
-    app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
   })
   .catch((err) => {
     console.error('MongoDB connection error:', err);
-    process.exit(1); // Optional: shut down server if DB fails
+    process.exit(1);
   });
-
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -83,10 +79,11 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   phone: String,
   address: String,
-  cvFileId: { type: mongoose.Schema.Types.ObjectId, ref: 'uploads.files' }, // GridFS file ID
+  cvFileId: { type: mongoose.Schema.Types.ObjectId, ref: 'uploads.files' },
   verified: { type: Boolean, default: false },
   otp: String,
   otpExpires: Date,
+  isAdmin: { type: Boolean, default: false },
 });
 const User = mongoose.model('User', userSchema);
 
@@ -112,7 +109,35 @@ const generateOTP = () => {
   return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-// Signup Route
+// Auth Middleware
+const authenticate = (req, res, next) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '');
+  if (!token) return res.status(401).json({ message: 'No token provided' });
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.userId = decoded.userId;
+    next();
+  } catch (err) {
+    res.status(401).json({ message: 'Invalid token' });
+  }
+};
+
+// Admin Middleware
+const adminMiddleware = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.userId);
+    if (!user || !user.isAdmin) {
+      return res.status(403).json({ message: 'Admin access required' });
+    }
+    next();
+  } catch (err) {
+    console.error('Admin middleware error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Routes
 app.post('/api/signup', async (req, res) => {
   const { name, email, password } = req.body;
 
@@ -155,7 +180,6 @@ app.post('/api/signup', async (req, res) => {
   }
 });
 
-// OTP Verification Route
 app.post('/api/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
 
@@ -181,44 +205,31 @@ app.post('/api/verify-otp', async (req, res) => {
   }
 });
 
-// Login Route
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
-
+  console.log('Login attempt:', { email, password });
   if (!email) return res.status(400).json({ message: 'Email is required' });
   if (!password) return res.status(400).json({ message: 'Password is required' });
-
   try {
     const user = await User.findOne({ email });
+    console.log('User found:', user ? { email: user.email, verified: user.verified } : null);
     if (!user) return res.status(400).json({ message: 'Invalid credentials' });
     if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
-
     const isMatch = await bcrypt.compare(password, user.password);
+    console.log('Password match:', isMatch);
     if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
-
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    res.json({ token, userId: user._id });
+    const token = jwt.sign(
+      { userId: user._id, isAdmin: user.isAdmin },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    res.json({ token, userId: user._id, isAdmin: user.isAdmin });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Auth Middleware
-const authenticate = (req, res, next) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
-  if (!token) return res.status(401).json({ message: 'No token provided' });
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.userId = decoded.userId;
-    next();
-  } catch (err) {
-    res.status(401).json({ message: 'Invalid token' });
-  }
-};
-
-// Profile Update Route (store CV in GridFS)
 app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => {
   const { name, phone, address } = req.body;
   const cv = req.file;
@@ -232,12 +243,10 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    // Delete old CV from GridFS
     if (user.cvFileId) {
       await gfs.delete(user.cvFileId);
     }
 
-    // Upload new CV to GridFS
     const uploadStream = gfs.openUploadStream(cv.originalname, {
       contentType: cv.mimetype,
     });
@@ -262,7 +271,6 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
   }
 });
 
-// Serve CV files from GridFS
 app.get('/api/cv/:fileId', async (req, res) => {
   try {
     const fileId = new mongoose.Types.ObjectId(req.params.fileId);
@@ -286,7 +294,6 @@ app.get('/api/cv/:fileId', async (req, res) => {
   }
 });
 
-// Resend OTP Route
 app.post('/api/resend-otp', async (req, res) => {
   const { email } = req.body;
 
@@ -316,5 +323,17 @@ app.post('/api/resend-otp', async (req, res) => {
   }
 });
 
+// Admin Route (moved after middleware definitions)
+app.get('/api/admin/users', authenticate, adminMiddleware, async (req, res) => {
+  try {
+    const users = await User.find({ cvFileId: { $exists: true } }, 'name email phone address cvFileId').lean();
+    res.json(users);
+  } catch (err) {
+    console.error('Fetch users error:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// Start server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
