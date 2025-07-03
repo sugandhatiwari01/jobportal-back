@@ -3,37 +3,30 @@ const express = require('express');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
 const cors = require('cors');
 const multer = require('multer');
-const nodemailer = require('nodemailer');
-const rateLimit = require('express-rate-limit');
-const helmet = require('helmet');
-const emailValidator = require('email-validator');
 const { GridFSBucket } = require('mongodb');
 
 const app = express();
 
 // Middleware
-app.use(helmet());
+app.use(express.json());
 app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || origin === 'http://localhost:5173') {
-      return callback(null, true);
-    }
-    if (origin && origin.endsWith('.vercel.app')) {
-      return callback(null, true);
-    }
-    callback(new Error('Not allowed by CORS'));
-  },
+  origin: ['http://localhost:5173', '*.vercel.app'],
   credentials: true,
 }));
-app.use(express.json());
-app.use(
-  rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100,
-  })
-);
+
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
+const db = mongoose.connection;
+let gfs;
 
 // Multer configuration for memory storage (for GridFS)
 const upload = multer({
@@ -54,197 +47,233 @@ const upload = multer({
   },
 });
 
-// MongoDB connection and GridFS setup
-let gfs;
-mongoose
-  .connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => {
-    console.log('MongoDB connected');
-    gfs = new GridFSBucket(mongoose.connection.db, {
-      bucketName: 'uploads',
-    });
-  })
-  .catch((err) => {
-    console.error('MongoDB connection error:', err);
-    process.exit(1);
-  });
+// Initialize GridFS after MongoDB connection
+db.once('open', () => {
+  gfs = new GridFSBucket(db.db, { bucketName: 'cvs' });
+  console.log('GridFS initialized');
+});
 
 // User Schema
 const userSchema = new mongoose.Schema({
-  name: String,
+  name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  phone: String,
-  address: String,
-  cvFileId: { type: mongoose.Schema.Types.ObjectId, ref: 'uploads.files' },
+  phone: { type: String },
+  state: { type: String, required: true, default: 'Unknown' },
+  city: { type: String, required: true, default: 'Unknown' },
+  houseNoStreet: { type: String },
+  cvFileId: { type: mongoose.Types.ObjectId, ref: 'cvs.files' },
+  otp: { type: String },
+  otpExpires: { type: Date },
   verified: { type: Boolean, default: false },
-  otp: String,
-  otpExpires: Date,
   isAdmin: { type: Boolean, default: false },
 });
+
 const User = mongoose.model('User', userSchema);
 
-// Validation helpers
-const validateName = (name) => name && name.length >= 2;
-const validateEmail = (email) => emailValidator.validate(email);
-const validatePassword = (password) =>
-  /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/.test(password);
-const validatePhone = (phone) => /^\d{10}$/.test(phone);
-const validateAddress = (address) => address && address.length >= 5;
-
-// Nodemailer transport
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
+// Job Post Schema
+const jobPostSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  location: { type: String, required: true },
+  postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  createdAt: { type: Date, default: Date.now },
 });
 
-// Generate OTP
-const generateOTP = () => {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-};
+const JobPost = mongoose.model('JobPost', jobPostSchema);
 
-// Auth Middleware
-const authenticate = (req, res, next) => {
-  const token = req.header('Authorization')?.replace('Bearer ', '');
+// Application Schema
+const applicationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  jobPostId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPost', required: true },
+  appliedAt: { type: Date, default: Date.now },
+});
+
+const Application = mongoose.model('Application', applicationSchema);
+
+// US States for Validation
+const usStates = [
+  'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
+  'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
+  'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
+  'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico',
+  'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania',
+  'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont',
+  'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'
+];
+
+// Validation Functions
+const validateName = (name) => name && name.length >= 2;
+const validateEmail = (email) => /\S+@\S+\.\S+/.test(email);
+const validatePassword = (password) =>
+  /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/.test(password);
+const validatePhone = (phone) => !phone || /^\d{10}$/.test(phone);
+const validateState = (state) => state && usStates.includes(state);
+const validateCity = (city) => city && city.length >= 2;
+const validateHouseNoStreet = (houseNoStreet) => !houseNoStreet || houseNoStreet.length >= 5;
+const validateJobPost = (title, description, location) =>
+  title && title.length >= 3 && description && description.length >= 10 && location && location.length >= 2;
+
+// Authentication Middleware
+const authenticate = async (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ message: 'No token provided' });
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.userId = decoded.userId;
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(401).json({ message: 'User not found' });
+    req.isAdmin = user.isAdmin;
     next();
   } catch (err) {
+    console.error('Auth error:', err.message);
     res.status(401).json({ message: 'Invalid token' });
   }
 };
 
-// Admin Middleware
-const adminMiddleware = async (req, res, next) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user || !user.isAdmin) {
-      return res.status(403).json({ message: 'Admin access required' });
-    }
-    next();
-  } catch (err) {
-    console.error('Admin middleware error:', err);
-    res.status(500).json({ message: 'Server error' });
-  }
-};
-
 // Routes
+// Signup
 app.post('/api/signup', async (req, res) => {
   const { name, email, password } = req.body;
+  console.log('Signup request:', { name, email });
+
+  const errors = {};
+  if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
+  if (!validateEmail(email)) errors.email = 'Invalid email format';
+  if (!validatePassword(password))
+    errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
+
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
 
   try {
-    if (!validateName(name)) throw new Error('Name must be at least 2 characters');
-    if (!email) throw new Error('Email is required');
-    if (!validateEmail(email)) throw new Error('Invalid email format');
-    if (!password) throw new Error('Password is required');
-    if (!validatePassword(password))
-      throw new Error('Password must be 8+ characters with uppercase, lowercase, number, and special character');
+    const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
+    if (existingUser) {
+      console.log('Email already exists:', email);
+      return res.status(400).json({ message: 'Email already exists' });
+    }
 
-    const existingUser = await User.findOne({ email });
-    if (existingUser) throw new Error('User already exists');
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const otp = generateOTP();
-    const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
-
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log('Generated OTP:', otp);
+    const hashedPassword = await bcrypt.hash(password.trim(), 10);
     const user = new User({
-      name,
-      email,
+      name: name.trim(),
+      email: email.trim().toLowerCase(),
       password: hashedPassword,
       otp,
-      otpExpires,
-      verified: false,
+      otpExpires: Date.now() + 10 * 60 * 1000,
+      state: 'Unknown',
+      city: 'Unknown',
     });
+    console.log('Saving user:', { name: user.name, email: user.email, state: user.state, city: user.city });
     await user.save();
+    console.log('User saved:', user._id);
 
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'Your OTP for Email Verification',
-      html: `<p>Your OTP is <b>${otp}</b>. It is valid for 10 minutes.</p>`,
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
     });
 
-    res.status(201).json({ message: 'User registered. Please verify your email with the OTP sent.' });
+    console.log('Sending email to:', email);
+    await transporter.sendMail({
+      from: `"User Profile App" <${process.env.EMAIL_USER}>`,
+      to: email.trim().toLowerCase(),
+      subject: 'Your OTP Code',
+      text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
+    });
+    console.log('Email sent successfully');
+
+    res.json({ message: 'OTP sent to email. Please verify.' });
   } catch (err) {
-    console.error('Signup error:', err.message);
-    res.status(err.message.includes('User already exists') ? 400 : 500).json({ message: err.message || 'Server error' });
+    console.error('Signup error:', err.message, err.stack);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
+// OTP Verification
 app.post('/api/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
+  console.log('Verify OTP request:', { email, otp });
 
   try {
-    if (!email) throw new Error('Email is required');
-    if (!otp) throw new Error('OTP is required');
-
-    const user = await User.findOne({ email });
-    if (!user) throw new Error('User not found');
-    if (user.verified) throw new Error('User already verified');
-    if (user.otp !== otp) throw new Error('Invalid OTP');
-    if (user.otpExpires < Date.now()) throw new Error('OTP expired');
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) return res.status(400).json({ message: 'User not found' });
+    if (user.verified) return res.status(400).json({ message: 'User already verified' });
+    if (user.otp !== otp) return res.status(400).json({ message: 'Invalid OTP' });
+    if (user.otpExpires < Date.now()) return res.status(400).json({ message: 'OTP expired' });
 
     user.verified = true;
-    user.otp = undefined;
-    user.otpExpires = undefined;
+    user.otp = null;
+    user.otpExpires = null;
     await user.save();
+    console.log('User verified:', user._id);
 
     res.json({ message: 'Email verified successfully' });
   } catch (err) {
     console.error('OTP verification error:', err.message);
-    res.status(400).json({ message: err.message || 'Invalid or expired OTP' });
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
+// Login
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
-  console.log('Login attempt:', { email, password });
-  if (!email) return res.status(400).json({ message: 'Email is required' });
-  if (!password) return res.status(400).json({ message: 'Password is required' });
+  console.log('Login request:', { email });
+
   try {
-    const user = await User.findOne({ email });
-    console.log('User found:', user ? { email: user.email, verified: user.verified } : null);
-    if (!user) return res.status(400).json({ message: 'Invalid credentials' });
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) return res.status(400).json({ message: 'Invalid email or password' });
     if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
-    const isMatch = await bcrypt.compare(password, user.password);
-    console.log('Password match:', isMatch);
-    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
-    const token = jwt.sign(
-      { userId: user._id, isAdmin: user.isAdmin },
-      process.env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
-    res.json({ token, userId: user._id, isAdmin: user.isAdmin });
+
+    const isMatch = await bcrypt.compare(password.trim(), user.password);
+    if (!isMatch) return res.status(400).json({ message: 'Invalid email or password' });
+
+    const token = jwt.sign({ userId: user._id, isAdmin: user.isAdmin }, process.env.JWT_SECRET, {
+      expiresIn: '1h',
+    });
+    console.log('Login successful:', user._id);
+    res.json({ token, isAdmin: user.isAdmin });
   } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Login error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
+// Profile Update with CV Upload
 app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => {
-  const { name, phone, address } = req.body;
+  const { phone, state, city, houseNoStreet } = req.body;
   const cv = req.file;
+  console.log('Profile update request:', { userId: req.userId, phone, state, city, houseNoStreet, file: !!cv });
 
-  if (!validateName(name)) return res.status(400).json({ message: 'Name must be at least 2 characters' });
-  if (!validatePhone(phone)) return res.status(400).json({ message: 'Phone number must be 10 digits' });
-  if (!validateAddress(address)) return res.status(400).json({ message: 'Address must be at least 5 characters' });
-  if (!cv) return res.status(400).json({ message: 'CV is required' });
+  const errors = {};
+  if (!validatePhone(phone)) errors.phone = 'Phone must be a 10-digit number';
+  if (!validateState(state)) errors.state = 'Invalid state';
+  if (!validateCity(city)) errors.city = 'City must be at least 2 characters';
+  if (!validateHouseNoStreet(houseNoStreet)) errors.houseNoStreet = 'Address must be at least 5 characters if provided';
+  if (!cv) errors.cv = 'CV file is required';
+
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
 
   try {
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
     if (user.cvFileId) {
-      await gfs.delete(user.cvFileId);
+      try {
+        await gfs.delete(new mongoose.Types.ObjectId(user.cvFileId));
+        console.log('Deleted old CV:', user.cvFileId);
+      } catch (err) {
+        console.error('Error deleting old CV:', err.message);
+      }
     }
 
     const uploadStream = gfs.openUploadStream(cv.originalname, {
@@ -258,19 +287,35 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
       uploadStream.on('error', (err) => reject(err));
     });
 
-    user.name = name;
-    user.phone = phone;
-    user.address = address;
+    user.phone = phone || user.phone;
+    user.state = state || user.state;
+    user.city = city || user.city;
+    user.houseNoStreet = houseNoStreet || user.houseNoStreet;
     user.cvFileId = fileId;
 
     await user.save();
+    console.log('Profile updated:', user._id);
     res.json({ message: 'Profile updated successfully', fileId });
   } catch (err) {
-    console.error('Profile update error:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Profile update error:', err.message, err.stack);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
+// Get Profile
+app.get('/api/profile', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select('name email phone state city houseNoStreet cvFileId');
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    console.log('Profile fetched:', user._id);
+    res.json(user);
+  } catch (err) {
+    console.error('Get profile error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Get CV File
 app.get('/api/cv/:fileId', async (req, res) => {
   try {
     const fileId = new mongoose.Types.ObjectId(req.params.fileId);
@@ -289,51 +334,158 @@ app.get('/api/cv/:fileId', async (req, res) => {
       res.status(500).json({ message: 'Error serving file' });
     });
   } catch (err) {
-    console.error('Serve CV error:', err);
+    console.error('CV fetch error:', err);
     res.status(400).json({ message: 'Invalid file ID' });
   }
 });
 
-app.post('/api/resend-otp', async (req, res) => {
-  const { email } = req.body;
-
+// Admin: Get Users with CVs
+app.get('/api/admin/users', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
-    if (!email) throw new Error('Email is required');
-    const user = await User.findOne({ email });
-    if (!user) throw new Error('User not found');
-    if (user.verified) throw new Error('User already verified');
-
-    const otp = generateOTP();
-    const otpExpires = new Date(Date.now() + 10 * 60 * 1000);
-    user.otp = otp;
-    user.otpExpires = otpExpires;
-    await user.save();
-
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: email,
-      subject: 'Your New OTP for Email Verification',
-      html: `<p>Your new OTP is <b>${otp}</b>. It is valid for 10 minutes.</p>`,
-    });
-
-    res.json({ message: 'New OTP sent successfully' });
-  } catch (err) {
-    console.error('Resend OTP error:', err.message);
-    res.status(400).json({ message: err.message || 'Server error' });
-  }
-});
-
-// Admin Route (moved after middleware definitions)
-app.get('/api/admin/users', authenticate, adminMiddleware, async (req, res) => {
-  try {
-    const users = await User.find({ cvFileId: { $exists: true } }, 'name email phone address cvFileId').lean();
+    const users = await User.find({ cvFileId: { $exists: true } })
+      .select('name email phone state city houseNoStreet cvFileId');
+    console.log('Fetched users:', users.length);
     res.json(users);
   } catch (err) {
-    console.error('Fetch users error:', err);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Fetch users error:', err.message, err.stack);
+    res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Start server
+// Admin: Create Job Post
+app.post('/api/admin/job-posts', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  const { title, description, location } = req.body;
+  console.log('Create job post request:', { title, location });
+
+  const errors = {};
+  if (!validateJobPost(title, description, location)) {
+    errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
+  }
+
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
+
+  try {
+    const jobPost = new JobPost({
+      title: title.trim(),
+      description: description.trim(),
+      location: location.trim(),
+      postedBy: req.userId,
+    });
+    await jobPost.save();
+    console.log('Job post created:', jobPost._id);
+    res.json({ message: 'Job post created successfully', jobPost });
+  } catch (err) {
+    console.error('Create job post error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Admin: Get All Job Posts
+app.get('/api/admin/job-posts', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  try {
+    const jobPosts = await JobPost.find().populate('postedBy', 'name email');
+    console.log('Fetched job posts:', jobPosts.length);
+    res.json(jobPosts);
+  } catch (err) {
+    console.error('Fetch job posts error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Admin: Get Single Job Post
+app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  try {
+    const jobPost = await JobPost.findById(req.params.id).populate('postedBy', 'name email');
+    if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
+    console.log('Fetched job post:', req.params.id);
+    res.json(jobPost);
+  } catch (err) {
+    console.error('Fetch job post error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Admin: Get Applications for a Job Post
+app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  try {
+    const jobPostId = req.params.id;
+    const applications = await Application.find({ jobPostId })
+      .populate('userId', 'name email phone state city houseNoStreet cvFileId')
+      .populate('jobPostId', 'title');
+    console.log('Fetched applications for job post:', jobPostId, applications.length);
+    res.json(applications);
+  } catch (err) {
+    console.error('Fetch applications error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// User: Get All Job Posts
+app.get('/api/jobs', async (req, res) => {
+  try {
+    const jobPosts = await JobPost.find().select('title description location createdAt');
+    console.log('Fetched job posts for users:', jobPosts.length);
+    res.json(jobPosts);
+  } catch (err) {
+    console.error('Fetch jobs error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// User: Apply to Job Post
+app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
+  const jobPostId = req.params.id;
+  console.log('Job apply request:', { userId: req.userId, jobPostId });
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
+    if (!user.cvFileId) return res.status(400).json({ message: 'Please upload a CV in your profile' });
+
+    const jobPost = await JobPost.findById(jobPostId);
+    if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
+
+    const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
+    if (existingApplication) {
+      console.log('User already applied:', req.userId, jobPostId);
+      return res.status(400).json({ message: 'You have already applied to this job' });
+    }
+
+    const application = new Application({
+      userId: req.userId,
+      jobPostId,
+    });
+    await application.save();
+    console.log('Application submitted:', application._id);
+    res.json({ message: 'Application submitted successfully' });
+  } catch (err) {
+    console.error('Apply error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// User: Get Applied Job Posts
+app.get('/api/user/applications', authenticate, async (req, res) => {
+  try {
+    const applications = await Application.find({ userId: req.userId }).select('jobPostId');
+    const jobPostIds = applications.map(app => app.jobPostId.toString());
+    console.log('Fetched user applications:', req.userId, jobPostIds.length);
+    res.json(jobPostIds);
+  } catch (err) {
+    console.error('Fetch user applications error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
