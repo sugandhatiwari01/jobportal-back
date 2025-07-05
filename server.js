@@ -7,28 +7,12 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const multer = require('multer');
 const { GridFSBucket } = require('mongodb');
-const path = require('path');
-const winston = require('winston');
 
 const app = express();
 
-// Logger Configuration
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.File({ filename: path.join(__dirname, 'logs', 'error.log'), level: 'error' }),
-    new winston.transports.File({ filename: path.join(__dirname, 'logs', 'combined.log') }),
-    new winston.transports.Console(),
-  ],
-});
-
 // Log all incoming requests
 app.use((req, res, next) => {
-  logger.info('Incoming request:', {
+  console.log('Incoming request:', {
     method: req.method,
     url: req.url,
     origin: req.get('Origin') || 'no-origin',
@@ -41,7 +25,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   const origin = req.get('Origin');
   if (origin && origin.includes('git.new')) {
-    logger.warn('Blocked suspicious origin:', { origin });
+    console.warn('Blocked suspicious origin:', { origin });
     return res.status(403).json({ message: 'Blocked suspicious origin' });
   }
   next();
@@ -53,11 +37,11 @@ app.use(express.json());
 // CORS Configuration
 app.use(cors({
   origin: (origin, callback) => {
-    logger.info('CORS Origin:', { origin });
+    console.log('CORS Origin:', { origin });
     if (!origin || origin === 'http://localhost:5173' || origin.endsWith('.vercel.app')) {
       return callback(null, true);
     }
-    logger.warn('Blocked origin:', { origin });
+    console.warn('Blocked origin:', { origin });
     callback(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
@@ -70,7 +54,7 @@ app.options('*', cors());
 
 // Health Check Route
 app.get('/health', (req, res) => {
-  logger.info('Health check requested', {
+  console.log('Health check requested', {
     method: req.method,
     url: req.url,
     origin: req.get('Origin') || 'no-origin',
@@ -81,11 +65,8 @@ app.get('/health', (req, res) => {
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => logger.info('MongoDB connected'))
-  .catch(err => logger.error('MongoDB connection error:', { error: err.message }));
-
-const db = mongoose.connection;
-let gfs;
+  .then(() => console.log('MongoDB connected'))
+  .catch(err => console.error('MongoDB connection error:', err.message));
 
 // Multer configuration for memory storage (for GridFS)
 const upload = multer({
@@ -106,10 +87,13 @@ const upload = multer({
   },
 });
 
+const db = mongoose.connection;
+let gfs;
+
 // Initialize GridFS
 db.once('open', () => {
   gfs = new GridFSBucket(db.db, { bucketName: 'cvs' });
-  logger.info('GridFS initialized');
+  console.log('GridFS initialized');
 });
 
 // User Schema
@@ -186,7 +170,7 @@ const authenticate = async (req, res, next) => {
     req.isAdmin = user.isAdmin;
     next();
   } catch (err) {
-    logger.error('Auth error:', { error: err.message });
+    console.error('Auth error:', err.message);
     res.status(401).json({ message: 'Invalid token' });
   }
 };
@@ -194,7 +178,7 @@ const authenticate = async (req, res, next) => {
 // Routes
 app.post('/api/signup', async (req, res) => {
   const { name, email, password } = req.body;
-  logger.info('Signup request:', { name, email });
+  console.log('Signup request:', { name, email });
 
   const errors = {};
   if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
@@ -203,19 +187,19 @@ app.post('/api/signup', async (req, res) => {
     errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
 
   if (Object.keys(errors).length > 0) {
-    logger.info('Validation errors:', { errors });
+    console.log('Validation errors:', errors);
     return res.status(400).json({ errors });
   }
 
   try {
     const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
     if (existingUser) {
-      logger.info('Email already exists:', { email });
+      console.log('Email already exists:', email);
       return res.status(400).json({ message: 'Email already exists' });
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    logger.info('Generated OTP:', { otp });
+    console.log('Generated OTP:', otp);
     const hashedPassword = await bcrypt.hash(password.trim(), 10);
     const user = new User({
       name: name.trim(),
@@ -227,9 +211,9 @@ app.post('/api/signup', async (req, res) => {
       city: 'Unknown',
       isAdmin: req.body.isAdmin || false,
     });
-    logger.info('Saving user:', { name: user.name, email: user.email, state: user.state, city: user.city });
+    console.log('Saving user:', { name: user.name, email: user.email, state: user.state, city: user.city });
     await user.save();
-    logger.info('User saved:', { userId: user._id });
+    console.log('User saved:', user._id);
 
     const transporter = nodemailer.createTransport({
       service: 'gmail',
@@ -239,18 +223,18 @@ app.post('/api/signup', async (req, res) => {
       },
     });
 
-    logger.info('Sending email to:', { email });
+    console.log('Sending email to:', email);
     await transporter.sendMail({
       from: `"User Profile App" <${process.env.EMAIL_USER}>`,
       to: email.trim().toLowerCase(),
       subject: 'Your OTP Code',
       text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
     });
-    logger.info('Email sent successfully');
+    console.log('Email sent successfully');
 
     res.json({ message: 'OTP sent to email. Please verify.' });
   } catch (err) {
-    logger.error('Signup error:', { error: err.message, stack: err.stack });
+    console.error('Signup error:', err.message, err.stack);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -258,7 +242,7 @@ app.post('/api/signup', async (req, res) => {
 // OTP Verification
 app.post('/api/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
-  logger.info('Verify OTP request:', { email, otp });
+  console.log('Verify OTP request:', { email, otp });
 
   try {
     const user = await User.findOne({ email: email.trim().toLowerCase() });
@@ -271,11 +255,11 @@ app.post('/api/verify-otp', async (req, res) => {
     user.otp = null;
     user.otpExpires = null;
     await user.save();
-    logger.info('User verified:', { userId: user._id });
+    console.log('User verified:', user._id);
 
     res.json({ message: 'Email verified successfully' });
   } catch (err) {
-    logger.error('OTP verification error:', { error: err.message });
+    console.error('OTP verification error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -283,7 +267,7 @@ app.post('/api/verify-otp', async (req, res) => {
 // Login
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
-  logger.info('Login request:', { email });
+  console.log('Login request:', { email });
 
   try {
     const user = await User.findOne({ email: email.trim().toLowerCase() });
@@ -298,10 +282,10 @@ app.post('/api/login', async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
-    logger.info('Login successful:', { userId: user._id });
+    console.log('Login successful:', user._id);
     res.json({ token, isAdmin: user.isAdmin });
   } catch (err) {
-    logger.error('Login error:', { error: err.message });
+    console.error('Login error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -310,7 +294,7 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => {
   const { phone, state, city, houseNoStreet } = req.body;
   const cv = req.file;
-  logger.info('Profile update request:', { userId: req.userId, phone, state, city, houseNoStreet, file: !!cv });
+  console.log('Profile update request:', { userId: req.userId, phone, state, city, houseNoStreet, file: !!cv });
 
   const errors = {};
   if (!validatePhone(phone)) errors.phone = 'Phone must be a 10-digit number';
@@ -320,7 +304,7 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
   if (!cv) errors.cv = 'CV file is required';
 
   if (Object.keys(errors).length > 0) {
-    logger.info('Validation errors:', { errors });
+    console.log('Validation errors:', errors);
     return res.status(400).json({ message: 'Validation failed', errors });
   }
 
@@ -331,9 +315,9 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
     if (user.cvFileId) {
       try {
         await gfs.delete(new mongoose.Types.ObjectId(user.cvFileId));
-        logger.info('Deleted old CV:', { fileId: user.cvFileId });
+        console.log('Deleted old CV:', user.cvFileId);
       } catch (err) {
-        logger.error('Error deleting old CV:', { error: err.message });
+        console.error('Error deleting old CV:', err.message);
       }
     }
 
@@ -355,10 +339,10 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
     user.cvFileId = fileId;
 
     await user.save();
-    logger.info('Profile updated:', { userId: user._id });
+    console.log('Profile updated:', user._id);
     res.json({ message: 'Profile updated successfully', fileId });
   } catch (err) {
-    logger.error('Profile update error:', { error: err.message, stack: err.stack });
+    console.error('Profile update error:', err.message, err.stack);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -368,10 +352,10 @@ app.get('/api/profile', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('name email phone state city houseNoStreet cvFileId');
     if (!user) return res.status(404).json({ message: 'User not found' });
-    logger.info('Profile fetched:', { userId: user._id });
+    console.log('Profile fetched:', user._id);
     res.json(user);
   } catch (err) {
-    logger.error('Get profile error:', { error: err.message });
+    console.error('Get profile error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -391,11 +375,11 @@ app.get('/api/cv/:fileId', async (req, res) => {
     downloadStream.pipe(res);
 
     downloadStream.on('error', (err) => {
-      logger.error('Download stream error:', { error: err.message });
+      console.error('Download stream error:', err);
       res.status(500).json({ message: 'Error serving file' });
     });
   } catch (err) {
-    logger.error('CV fetch error:', { error: err.message });
+    console.error('CV fetch error:', err);
     res.status(400).json({ message: 'Invalid file ID' });
   }
 });
@@ -406,10 +390,10 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
   try {
     const users = await User.find({ cvFileId: { $exists: true } })
       .select('name email phone state city houseNoStreet cvFileId');
-    logger.info('Fetched users with CVs:', { count: users.length });
+    console.log('Fetched users with CVs, Count:', users.length);
     res.json(users);
   } catch (err) {
-    logger.error('Fetch users error:', { error: err.message, stack: err.stack });
+    console.error('Fetch users error:', err.message, err.stack);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -418,7 +402,7 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
 app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   const { title, description, location } = req.body;
-  logger.info('Create job post request:', { title, location });
+  console.log('Create job post request:', { title, location });
 
   const errors = {};
   if (!validateJobPost(title, description, location)) {
@@ -426,7 +410,7 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   }
 
   if (Object.keys(errors).length > 0) {
-    logger.info('Validation errors:', { errors });
+    console.log('Validation errors:', errors);
     return res.status(400).json({ message: 'Validation failed', errors });
   }
 
@@ -439,10 +423,10 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
     });
     await jobPost.save();
     await jobPost.populate('postedBy', 'name email');
-    logger.info('Job post created:', { jobPostId: jobPost._id });
+    console.log('Job post created:', jobPost._id);
     res.json({ message: 'Job post created successfully', jobPost });
   } catch (err) {
-    logger.error('Create job post error:', { error: err.message });
+    console.error('Create job post error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -453,10 +437,10 @@ app.get('/api/admin/job-posts', authenticate, async (req, res) => {
   try {
     const jobPosts = await JobPost.find({ postedBy: req.userId })
       .populate('postedBy', 'name email');
-    logger.info('Fetched job posts:', { count: jobPosts.length });
+    console.log('Fetched job posts, Count:', jobPosts.length);
     res.json(jobPosts);
   } catch (err) {
-    logger.error('Fetch job posts error:', { error: err.message });
+    console.error('Fetch job posts error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -468,10 +452,10 @@ app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
     const jobPost = await JobPost.findOne({ _id: req.params.id, postedBy: req.userId })
       .populate('postedBy', 'name email');
     if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized' });
-    logger.info('Fetched job post:', { jobPostId: req.params.id });
+    console.log('Fetched job post:', req.params.id);
     res.json(jobPost);
   } catch (err) {
-    logger.error('Fetch job post error:', { error: err.message });
+    console.error('Fetch job post error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -487,10 +471,10 @@ app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) 
     const applications = await Application.find({ jobPostId })
       .populate('userId', 'name email phone state city houseNoStreet cvFileId')
       .populate('jobPostId', 'title');
-    logger.info('Fetched applications for job post:', { jobPostId, count: applications.length });
+    console.log('Fetched applications for job post:', jobPostId, 'Count:', applications.length);
     res.json(applications);
   } catch (err) {
-    logger.error('Fetch applications error:', { error: err.message });
+    console.error('Fetch applications error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -499,10 +483,10 @@ app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) 
 app.get('/api/jobs', async (req, res) => {
   try {
     const jobPosts = await JobPost.find().select('title description location createdAt');
-    logger.info('Fetched job posts for users:', { count: jobPosts.length });
+    console.log('Fetched job posts for users:', jobPosts.length);
     res.json(jobPosts);
   } catch (err) {
-    logger.error('Fetch jobs error:', { error: err.message });
+    console.error('Fetch jobs error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -510,7 +494,7 @@ app.get('/api/jobs', async (req, res) => {
 // User: Apply to Job Post
 app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
   const jobPostId = req.params.id;
-  logger.info('Job apply request:', { userId: req.userId, jobPostId });
+  console.log('Job apply request:', { userId: req.userId, jobPostId });
 
   try {
     const user = await User.findById(req.userId);
@@ -523,7 +507,7 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
 
     const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
     if (existingApplication) {
-      logger.info('User already applied:', { userId: req.userId, jobPostId });
+      console.log('User already applied:', req.userId, jobPostId);
       return res.status(400).json({ message: 'You have already applied to this job' });
     }
 
@@ -532,10 +516,10 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
       jobPostId,
     });
     await application.save();
-    logger.info('Application submitted:', { applicationId: application._id });
+    console.log('Application submitted:', application._id);
     res.json({ message: 'Application submitted successfully' });
   } catch (err) {
-    logger.error('Apply error:', { error: err.message });
+    console.error('Apply error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -545,17 +529,17 @@ app.get('/api/user/applications', authenticate, async (req, res) => {
   try {
     const applications = await Application.find({ userId: req.userId })
       .populate('jobPostId', 'title description location');
-    logger.info('Fetched user applications:', { userId: req.userId, count: applications.length });
+    console.log('Fetched user applications:', req.userId, 'Count:', applications.length);
     res.json(applications);
   } catch (err) {
-    logger.error('Fetch user applications error:', { error: err.message });
+    console.error('Fetch user applications error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
 // Global Error Handler
 app.use((err, req, res, next) => {
-  logger.error('Global error:', {
+  console.error('Global error:', {
     message: err.message,
     stack: err.stack,
     method: req.method || 'N/A',
@@ -568,7 +552,7 @@ app.use((err, req, res, next) => {
 
 // Start Server (for Render)
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 // Export for Vercel
 module.exports = app;
