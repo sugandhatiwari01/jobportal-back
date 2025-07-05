@@ -13,26 +13,16 @@ const app = express();
 // Middleware
 app.use(express.json());
 
-const isValidOrigin = (origin) => {
-  if (!origin) return true;
-  const urlPattern = /^https?:\/\/[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(\/.*)?$/;
-  return urlPattern.test(origin);
-};
+
 
 app.use(cors({
   origin: (origin, callback) => {
-    console.log('CORS Origin:', origin); // Debug log
-    if (!isValidOrigin(origin)) {
-      console.warn('Invalid origin detected:', origin);
-      return callback(new Error('Invalid origin format'));
-    }
-    if (origin && origin.includes('git.new')) {
-      console.warn('Blocked suspicious origin:', origin);
-      return callback(new Error('Blocked suspicious origin'));
-    }
-    if (!origin || origin === 'http://localhost:5173' || origin.endsWith('.vercel.app')) {
+    console.log('CORS Origin:', origin);
+    if (!origin) return callback(null, true);
+    if (origin === 'http://localhost:5173' || origin.endsWith('.vercel.app')) {
       return callback(null, true);
     }
+    console.warn('Blocked origin:', origin);
     callback(new Error(`Not allowed by CORS: ${origin}`));
   },
   credentials: true,
