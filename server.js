@@ -7,28 +7,82 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const multer = require('multer');
 const { GridFSBucket } = require('mongodb');
+const path = require('path');
+const winston = require('winston');
 
 const app = express();
+
+// Logger Configuration
+const logger = winston.createLogger({
+  level: 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.json()
+  ),
+  transports: [
+    new winston.transports.File({ filename: path.join(__dirname, 'logs', 'error.log'), level: 'error' }),
+    new winston.transports.File({ filename: path.join(__dirname, 'logs', 'combined.log') }),
+    new winston.transports.Console(),
+  ],
+});
+
+// Log all incoming requests
+app.use((req, res, next) => {
+  logger.info('Incoming request:', {
+    method: req.method,
+    url: req.url,
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers,
+  });
+  next();
+});
+
+// Block suspicious origins
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (origin && origin.includes('git.new')) {
+    logger.warn('Blocked suspicious origin:', { origin });
+    return res.status(403).json({ message: 'Blocked suspicious origin' });
+  }
+  next();
+});
 
 // Middleware
 app.use(express.json());
 
-
-
+// CORS Configuration
 app.use(cors({
-  origin: '*', // Allow all origins for testing
+  origin: (origin, callback) => {
+    logger.info('CORS Origin:', { origin });
+    if (!origin || origin === 'http://localhost:5173' || origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    logger.warn('Blocked origin:', { origin });
+    callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Handle preflight requests for all routes
+// Handle preflight requests
 app.options('*', cors());
+
+// Health Check Route
+app.get('/health', (req, res) => {
+  logger.info('Health check requested', {
+    method: req.method,
+    url: req.url,
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers,
+  });
+  res.json({ status: 'OK' });
+});
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
+  .then(() => logger.info('MongoDB connected'))
+  .catch(err => logger.error('MongoDB connection error:', { error: err.message }));
 
 const db = mongoose.connection;
 let gfs;
@@ -52,10 +106,10 @@ const upload = multer({
   },
 });
 
-// Initialize GridFS after MongoDB connection
+// Initialize GridFS
 db.once('open', () => {
   gfs = new GridFSBucket(db.db, { bucketName: 'cvs' });
-  console.log('GridFS initialized');
+  logger.info('GridFS initialized');
 });
 
 // User Schema
@@ -93,33 +147,14 @@ const applicationSchema = new mongoose.Schema({
   jobPostId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPost', required: true },
   appliedAt: { type: Date, default: Date.now },
 });
-const winston = require('winston');
 
-const logger = winston.createLogger({
-  level: 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.json()
-  ),
-  transports: [
-    new winston.transports.File({ filename: 'error.log', level: 'error' }),
-    new winston.transports.File({ filename: 'combined.log' }),
-    new winston.transports.Console(),
-  ],
-});
-
-// Replace console.log with logger
-app.use((req, res, next) => {
-  logger.info(`${req.method} ${req.url} from ${req.get('Origin') || 'no-origin'}`);
-  next();
-});
 const Application = mongoose.model('Application', applicationSchema);
 
 // US States for Validation
 const usStates = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
   'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
-  'Louisiana', 'Maine', 'Maryuchs', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
+  'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
   'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico',
   'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania',
   'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont',
@@ -151,16 +186,15 @@ const authenticate = async (req, res, next) => {
     req.isAdmin = user.isAdmin;
     next();
   } catch (err) {
-    console.error('Auth error:', err.message);
+    logger.error('Auth error:', { error: err.message });
     res.status(401).json({ message: 'Invalid token' });
   }
 };
 
 // Routes
-// Signup
 app.post('/api/signup', async (req, res) => {
   const { name, email, password } = req.body;
-  console.log('Signup request:', { name, email });
+  logger.info('Signup request:', { name, email });
 
   const errors = {};
   if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
@@ -169,19 +203,19 @@ app.post('/api/signup', async (req, res) => {
     errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
 
   if (Object.keys(errors).length > 0) {
-    console.log('Validation errors:', errors);
+    logger.info('Validation errors:', { errors });
     return res.status(400).json({ errors });
   }
 
   try {
     const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
     if (existingUser) {
-      console.log('Email already exists:', email);
+      logger.info('Email already exists:', { email });
       return res.status(400).json({ message: 'Email already exists' });
     }
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    console.log('Generated OTP:', otp);
+    logger.info('Generated OTP:', { otp });
     const hashedPassword = await bcrypt.hash(password.trim(), 10);
     const user = new User({
       name: name.trim(),
@@ -193,9 +227,9 @@ app.post('/api/signup', async (req, res) => {
       city: 'Unknown',
       isAdmin: req.body.isAdmin || false,
     });
-    console.log('Saving user:', { name: user.name, email: user.email, state: user.state, city: user.city });
+    logger.info('Saving user:', { name: user.name, email: user.email, state: user.state, city: user.city });
     await user.save();
-    console.log('User saved:', user._id);
+    logger.info('User saved:', { userId: user._id });
 
     const transporter = nodemailer.createTransport({
       service: 'gmail',
@@ -205,18 +239,18 @@ app.post('/api/signup', async (req, res) => {
       },
     });
 
-    console.log('Sending email to:', email);
+    logger.info('Sending email to:', { email });
     await transporter.sendMail({
       from: `"User Profile App" <${process.env.EMAIL_USER}>`,
       to: email.trim().toLowerCase(),
       subject: 'Your OTP Code',
       text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
     });
-    console.log('Email sent successfully');
+    logger.info('Email sent successfully');
 
     res.json({ message: 'OTP sent to email. Please verify.' });
   } catch (err) {
-    console.error('Signup error:', err.message, err.stack);
+    logger.error('Signup error:', { error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -224,7 +258,7 @@ app.post('/api/signup', async (req, res) => {
 // OTP Verification
 app.post('/api/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
-  console.log('Verify OTP request:', { email, otp });
+  logger.info('Verify OTP request:', { email, otp });
 
   try {
     const user = await User.findOne({ email: email.trim().toLowerCase() });
@@ -237,11 +271,11 @@ app.post('/api/verify-otp', async (req, res) => {
     user.otp = null;
     user.otpExpires = null;
     await user.save();
-    console.log('User verified:', user._id);
+    logger.info('User verified:', { userId: user._id });
 
     res.json({ message: 'Email verified successfully' });
   } catch (err) {
-    console.error('OTP verification error:', err.message);
+    logger.error('OTP verification error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -249,7 +283,7 @@ app.post('/api/verify-otp', async (req, res) => {
 // Login
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
-  console.log('Login request:', { email });
+  logger.info('Login request:', { email });
 
   try {
     const user = await User.findOne({ email: email.trim().toLowerCase() });
@@ -264,10 +298,10 @@ app.post('/api/login', async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '1h' }
     );
-    console.log('Login successful:', user._id);
+    logger.info('Login successful:', { userId: user._id });
     res.json({ token, isAdmin: user.isAdmin });
   } catch (err) {
-    console.error('Login error:', err.message);
+    logger.error('Login error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -276,7 +310,7 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => {
   const { phone, state, city, houseNoStreet } = req.body;
   const cv = req.file;
-  console.log('Profile update request:', { userId: req.userId, phone, state, city, houseNoStreet, file: !!cv });
+  logger.info('Profile update request:', { userId: req.userId, phone, state, city, houseNoStreet, file: !!cv });
 
   const errors = {};
   if (!validatePhone(phone)) errors.phone = 'Phone must be a 10-digit number';
@@ -286,7 +320,7 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
   if (!cv) errors.cv = 'CV file is required';
 
   if (Object.keys(errors).length > 0) {
-    console.log('Validation errors:', errors);
+    logger.info('Validation errors:', { errors });
     return res.status(400).json({ message: 'Validation failed', errors });
   }
 
@@ -297,9 +331,9 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
     if (user.cvFileId) {
       try {
         await gfs.delete(new mongoose.Types.ObjectId(user.cvFileId));
-        console.log('Deleted old CV:', user.cvFileId);
+        logger.info('Deleted old CV:', { fileId: user.cvFileId });
       } catch (err) {
-        console.error('Error deleting old CV:', err.message);
+        logger.error('Error deleting old CV:', { error: err.message });
       }
     }
 
@@ -321,10 +355,10 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
     user.cvFileId = fileId;
 
     await user.save();
-    console.log('Profile updated:', user._id);
+    logger.info('Profile updated:', { userId: user._id });
     res.json({ message: 'Profile updated successfully', fileId });
   } catch (err) {
-    console.error('Profile update error:', err.message, err.stack);
+    logger.error('Profile update error:', { error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -334,10 +368,10 @@ app.get('/api/profile', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('name email phone state city houseNoStreet cvFileId');
     if (!user) return res.status(404).json({ message: 'User not found' });
-    console.log('Profile fetched:', user._id);
+    logger.info('Profile fetched:', { userId: user._id });
     res.json(user);
   } catch (err) {
-    console.error('Get profile error:', err.message);
+    logger.error('Get profile error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -357,11 +391,11 @@ app.get('/api/cv/:fileId', async (req, res) => {
     downloadStream.pipe(res);
 
     downloadStream.on('error', (err) => {
-      console.error('Download stream error:', err);
+      logger.error('Download stream error:', { error: err.message });
       res.status(500).json({ message: 'Error serving file' });
     });
   } catch (err) {
-    console.error('CV fetch error:', err);
+    logger.error('CV fetch error:', { error: err.message });
     res.status(400).json({ message: 'Invalid file ID' });
   }
 });
@@ -372,10 +406,10 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
   try {
     const users = await User.find({ cvFileId: { $exists: true } })
       .select('name email phone state city houseNoStreet cvFileId');
-    console.log('Fetched users with CVs, Count:', users.length);
+    logger.info('Fetched users with CVs:', { count: users.length });
     res.json(users);
   } catch (err) {
-    console.error('Fetch users error:', err.message, err.stack);
+    logger.error('Fetch users error:', { error: err.message, stack: err.stack });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -384,7 +418,7 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
 app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   const { title, description, location } = req.body;
-  console.log('Create job post request:', { title, location });
+  logger.info('Create job post request:', { title, location });
 
   const errors = {};
   if (!validateJobPost(title, description, location)) {
@@ -392,7 +426,7 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   }
 
   if (Object.keys(errors).length > 0) {
-    console.log('Validation errors:', errors);
+    logger.info('Validation errors:', { errors });
     return res.status(400).json({ message: 'Validation failed', errors });
   }
 
@@ -405,10 +439,10 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
     });
     await jobPost.save();
     await jobPost.populate('postedBy', 'name email');
-    console.log('Job post created:', jobPost._id);
+    logger.info('Job post created:', { jobPostId: jobPost._id });
     res.json({ message: 'Job post created successfully', jobPost });
   } catch (err) {
-    console.error('Create job post error:', err.message);
+    logger.error('Create job post error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -419,10 +453,10 @@ app.get('/api/admin/job-posts', authenticate, async (req, res) => {
   try {
     const jobPosts = await JobPost.find({ postedBy: req.userId })
       .populate('postedBy', 'name email');
-    console.log('Fetched job posts, Count:', jobPosts.length);
+    logger.info('Fetched job posts:', { count: jobPosts.length });
     res.json(jobPosts);
   } catch (err) {
-    console.error('Fetch job posts error:', err.message);
+    logger.error('Fetch job posts error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -434,10 +468,10 @@ app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
     const jobPost = await JobPost.findOne({ _id: req.params.id, postedBy: req.userId })
       .populate('postedBy', 'name email');
     if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized' });
-    console.log('Fetched job post:', req.params.id);
+    logger.info('Fetched job post:', { jobPostId: req.params.id });
     res.json(jobPost);
   } catch (err) {
-    console.error('Fetch job post error:', err.message);
+    logger.error('Fetch job post error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -453,10 +487,10 @@ app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) 
     const applications = await Application.find({ jobPostId })
       .populate('userId', 'name email phone state city houseNoStreet cvFileId')
       .populate('jobPostId', 'title');
-    console.log('Fetched applications for job post:', jobPostId, 'Count:', applications.length);
+    logger.info('Fetched applications for job post:', { jobPostId, count: applications.length });
     res.json(applications);
   } catch (err) {
-    console.error('Fetch applications error:', err.message);
+    logger.error('Fetch applications error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -465,10 +499,10 @@ app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) 
 app.get('/api/jobs', async (req, res) => {
   try {
     const jobPosts = await JobPost.find().select('title description location createdAt');
-    console.log('Fetched job posts for users:', jobPosts.length);
+    logger.info('Fetched job posts for users:', { count: jobPosts.length });
     res.json(jobPosts);
   } catch (err) {
-    console.error('Fetch jobs error:', err.message);
+    logger.error('Fetch jobs error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -476,7 +510,7 @@ app.get('/api/jobs', async (req, res) => {
 // User: Apply to Job Post
 app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
   const jobPostId = req.params.id;
-  console.log('Job apply request:', { userId: req.userId, jobPostId });
+  logger.info('Job apply request:', { userId: req.userId, jobPostId });
 
   try {
     const user = await User.findById(req.userId);
@@ -489,7 +523,7 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
 
     const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
     if (existingApplication) {
-      console.log('User already applied:', req.userId, jobPostId);
+      logger.info('User already applied:', { userId: req.userId, jobPostId });
       return res.status(400).json({ message: 'You have already applied to this job' });
     }
 
@@ -498,10 +532,10 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
       jobPostId,
     });
     await application.save();
-    console.log('Application submitted:', application._id);
+    logger.info('Application submitted:', { applicationId: application._id });
     res.json({ message: 'Application submitted successfully' });
   } catch (err) {
-    console.error('Apply error:', err.message);
+    logger.error('Apply error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
@@ -511,14 +545,30 @@ app.get('/api/user/applications', authenticate, async (req, res) => {
   try {
     const applications = await Application.find({ userId: req.userId })
       .populate('jobPostId', 'title description location');
-    console.log('Fetched user applications:', req.userId, 'Count:', applications.length);
+    logger.info('Fetched user applications:', { userId: req.userId, count: applications.length });
     res.json(applications);
   } catch (err) {
-    console.error('Fetch user applications error:', err.message);
+    logger.error('Fetch user applications error:', { error: err.message });
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Start Server
+// Global Error Handler
+app.use((err, req, res, next) => {
+  logger.error('Global error:', {
+    message: err.message,
+    stack: err.stack,
+    method: req.method || 'N/A',
+    url: req.url || 'N/A',
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers || {},
+  });
+  res.status(500).json({ message: 'Server error', error: err.message });
+});
+
+// Start Server (for Render)
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => logger.info(`Server running on port ${PORT}`));
+
+// Export for Vercel
+module.exports = app;
