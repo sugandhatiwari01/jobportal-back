@@ -16,15 +16,7 @@ app.use(express.json());
 
 
 app.use(cors({
-  origin: (origin, callback) => {
-    console.log('CORS Origin:', origin);
-    if (!origin) return callback(null, true);
-    if (origin === 'http://localhost:5173' || origin.endsWith('.vercel.app')) {
-      return callback(null, true);
-    }
-    console.warn('Blocked origin:', origin);
-    callback(new Error(`Not allowed by CORS: ${origin}`));
-  },
+  origin: '*', // Allow all origins for testing
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
