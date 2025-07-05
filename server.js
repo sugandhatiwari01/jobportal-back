@@ -24,25 +24,22 @@ app.use((req, res, next) => {
   next();
 });
 
-// Block suspicious origins (to prevent path-to-regexp errors)
-app.use((req, res, next) => {
-  const origin = req.get('Origin');
-  if (origin && origin.includes('git.new')) {
-    console.warn('Blocked suspicious origin:', { origin });
-    return res.status(403).json({ message: 'Blocked suspicious origin' });
-  }
-  next();
-});
-
 // CORS Configuration
 app.use(cors({
-  origin: ['http://localhost:5173', /\.vercel\.app$/],
+  origin: (origin, callback) => {
+    console.log('CORS Origin:', { origin });
+    if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin)) {
+      return callback(null, true);
+    }
+    console.warn('Blocked origin:', { origin });
+    callback(new Error(`Not allowed by CORS: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Handle preflight requests
+// Explicitly handle OPTIONS requests
 app.options('*', cors());
 
 // Health Check Route (for Render)
