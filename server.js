@@ -18,10 +18,7 @@ app.use(cors({
 }));
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
+mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB connection error:', err));
 
@@ -95,7 +92,7 @@ const Application = mongoose.model('Application', applicationSchema);
 const usStates = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
   'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
-  'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
+  'Louisiana', 'Maine', 'Maryuchs', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
   'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico',
   'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania',
   'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont',
@@ -146,7 +143,7 @@ app.post('/api/signup', async (req, res) => {
 
   if (Object.keys(errors).length > 0) {
     console.log('Validation errors:', errors);
-    return res.status(400).json({ message: 'Validation failed', errors });
+    return res.status(400).json({ errors });
   }
 
   try {
@@ -167,6 +164,7 @@ app.post('/api/signup', async (req, res) => {
       otpExpires: Date.now() + 10 * 60 * 1000,
       state: 'Unknown',
       city: 'Unknown',
+      isAdmin: req.body.isAdmin || false,
     });
     console.log('Saving user:', { name: user.name, email: user.email, state: user.state, city: user.city });
     await user.save();
@@ -234,9 +232,11 @@ app.post('/api/login', async (req, res) => {
     const isMatch = await bcrypt.compare(password.trim(), user.password);
     if (!isMatch) return res.status(400).json({ message: 'Invalid email or password' });
 
-    const token = jwt.sign({ userId: user._id, isAdmin: user.isAdmin }, process.env.JWT_SECRET, {
-      expiresIn: '1h',
-    });
+    const token = jwt.sign(
+      { userId: user._id, isAdmin: user.isAdmin },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
     console.log('Login successful:', user._id);
     res.json({ token, isAdmin: user.isAdmin });
   } catch (err) {
@@ -345,7 +345,7 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
   try {
     const users = await User.find({ cvFileId: { $exists: true } })
       .select('name email phone state city houseNoStreet cvFileId');
-    console.log('Fetched users:', users.length);
+    console.log('Fetched users with CVs, Count:', users.length);
     res.json(users);
   } catch (err) {
     console.error('Fetch users error:', err.message, err.stack);
@@ -377,6 +377,7 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       postedBy: req.userId,
     });
     await jobPost.save();
+    await jobPost.populate('postedBy', 'name email');
     console.log('Job post created:', jobPost._id);
     res.json({ message: 'Job post created successfully', jobPost });
   } catch (err) {
@@ -389,8 +390,9 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
 app.get('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
-    const jobPosts = await JobPost.find().populate('postedBy', 'name email');
-    console.log('Fetched job posts:', jobPosts.length);
+    const jobPosts = await JobPost.find({ postedBy: req.userId })
+      .populate('postedBy', 'name email');
+    console.log('Fetched job posts, Count:', jobPosts.length);
     res.json(jobPosts);
   } catch (err) {
     console.error('Fetch job posts error:', err.message);
@@ -402,8 +404,9 @@ app.get('/api/admin/job-posts', authenticate, async (req, res) => {
 app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
-    const jobPost = await JobPost.findById(req.params.id).populate('postedBy', 'name email');
-    if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
+    const jobPost = await JobPost.findOne({ _id: req.params.id, postedBy: req.userId })
+      .populate('postedBy', 'name email');
+    if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized' });
     console.log('Fetched job post:', req.params.id);
     res.json(jobPost);
   } catch (err) {
@@ -417,10 +420,13 @@ app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) 
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
     const jobPostId = req.params.id;
+    const jobPost = await JobPost.findOne({ _id: jobPostId, postedBy: req.userId });
+    if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized to view its applications' });
+
     const applications = await Application.find({ jobPostId })
       .populate('userId', 'name email phone state city houseNoStreet cvFileId')
       .populate('jobPostId', 'title');
-    console.log('Fetched applications for job post:', jobPostId, applications.length);
+    console.log('Fetched applications for job post:', jobPostId, 'Count:', applications.length);
     res.json(applications);
   } catch (err) {
     console.error('Fetch applications error:', err.message);
@@ -476,10 +482,10 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
 // User: Get Applied Job Posts
 app.get('/api/user/applications', authenticate, async (req, res) => {
   try {
-    const applications = await Application.find({ userId: req.userId }).select('jobPostId');
-    const jobPostIds = applications.map(app => app.jobPostId.toString());
-    console.log('Fetched user applications:', req.userId, jobPostIds.length);
-    res.json(jobPostIds);
+    const applications = await Application.find({ userId: req.userId })
+      .populate('jobPostId', 'title description location');
+    console.log('Fetched user applications:', req.userId, 'Count:', applications.length);
+    res.json(applications);
   } catch (err) {
     console.error('Fetch user applications error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
