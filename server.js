@@ -12,15 +12,54 @@ const app = express();
 
 // Middleware
 app.use(express.json());
+
+// Log all incoming requests
+app.use((req, res, next) => {
+  console.log('Incoming request:', {
+    method: req.method,
+    url: req.url,
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers,
+  });
+  next();
+});
+
+// Block suspicious origins (to prevent path-to-regexp errors)
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (origin && origin.includes('git.new')) {
+    console.warn('Blocked suspicious origin:', { origin });
+    return res.status(403).json({ message: 'Blocked suspicious origin' });
+  }
+  next();
+});
+
+// CORS Configuration
 app.use(cors({
-  origin: ['http://localhost:5173', '*.vercel.app'],
+  origin: ['http://localhost:5173', /\.vercel\.app$/],
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+
+// Handle preflight requests
+app.options('*', cors());
+
+// Health Check Route (for Render)
+app.get('/health', (req, res) => {
+  console.log('Health check requested', {
+    method: req.method,
+    url: req.url,
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers,
+  });
+  res.json({ status: 'OK' });
+});
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
+  .catch(err => console.error('MongoDB connection error:', err.message));
 
 const db = mongoose.connection;
 let gfs;
@@ -44,7 +83,7 @@ const upload = multer({
   },
 });
 
-// Initialize GridFS after MongoDB connection
+// Initialize GridFS
 db.once('open', () => {
   gfs = new GridFSBucket(db.db, { bucketName: 'cvs' });
   console.log('GridFS initialized');
@@ -92,7 +131,7 @@ const Application = mongoose.model('Application', applicationSchema);
 const usStates = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
   'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
-  'Louisiana', 'Maine', 'Maryuchs', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
+  'Louisiana', 'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota', 'Mississippi',
   'Missouri', 'Montana', 'Nebraska', 'Nevada', 'New Hampshire', 'New Jersey', 'New Mexico',
   'New York', 'North Carolina', 'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania',
   'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont',
@@ -130,7 +169,6 @@ const authenticate = async (req, res, next) => {
 };
 
 // Routes
-// Signup
 app.post('/api/signup', async (req, res) => {
   const { name, email, password } = req.body;
   console.log('Signup request:', { name, email });
@@ -194,7 +232,6 @@ app.post('/api/signup', async (req, res) => {
   }
 });
 
-// OTP Verification
 app.post('/api/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
   console.log('Verify OTP request:', { email, otp });
@@ -219,7 +256,6 @@ app.post('/api/verify-otp', async (req, res) => {
   }
 });
 
-// Login
 app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   console.log('Login request:', { email });
@@ -245,7 +281,6 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Profile Update with CV Upload
 app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => {
   const { phone, state, city, houseNoStreet } = req.body;
   const cv = req.file;
@@ -302,7 +337,6 @@ app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => 
   }
 });
 
-// Get Profile
 app.get('/api/profile', authenticate, async (req, res) => {
   try {
     const user = await User.findById(req.userId).select('name email phone state city houseNoStreet cvFileId');
@@ -315,7 +349,6 @@ app.get('/api/profile', authenticate, async (req, res) => {
   }
 });
 
-// Get CV File
 app.get('/api/cv/:fileId', async (req, res) => {
   try {
     const fileId = new mongoose.Types.ObjectId(req.params.fileId);
@@ -339,7 +372,6 @@ app.get('/api/cv/:fileId', async (req, res) => {
   }
 });
 
-// Admin: Get Users with CVs
 app.get('/api/admin/users', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
@@ -353,7 +385,6 @@ app.get('/api/admin/users', authenticate, async (req, res) => {
   }
 });
 
-// Admin: Create Job Post
 app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   const { title, description, location } = req.body;
@@ -386,7 +417,6 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   }
 });
 
-// Admin: Get All Job Posts
 app.get('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
@@ -400,7 +430,6 @@ app.get('/api/admin/job-posts', authenticate, async (req, res) => {
   }
 });
 
-// Admin: Get Single Job Post
 app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
@@ -415,7 +444,6 @@ app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
   }
 });
 
-// Admin: Get Applications for a Job Post
 app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
@@ -434,7 +462,6 @@ app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) 
   }
 });
 
-// User: Get All Job Posts
 app.get('/api/jobs', async (req, res) => {
   try {
     const jobPosts = await JobPost.find().select('title description location createdAt');
@@ -446,7 +473,6 @@ app.get('/api/jobs', async (req, res) => {
   }
 });
 
-// User: Apply to Job Post
 app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
   const jobPostId = req.params.id;
   console.log('Job apply request:', { userId: req.userId, jobPostId });
@@ -479,7 +505,6 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
   }
 });
 
-// User: Get Applied Job Posts
 app.get('/api/user/applications', authenticate, async (req, res) => {
   try {
     const applications = await Application.find({ userId: req.userId })
@@ -492,6 +517,22 @@ app.get('/api/user/applications', authenticate, async (req, res) => {
   }
 });
 
-// Start Server
+// Global Error Handler
+app.use((err, req, res, next) => {
+  console.error('Global error:', {
+    message: err.message,
+    stack: err.stack,
+    method: req.method || 'N/A',
+    url: req.url || 'N/A',
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers || {},
+  });
+  res.status(500).json({ message: 'Server error', error: err.message });
+});
+
+// Start Server (for Render)
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Export for Vercel
+module.exports = app;
