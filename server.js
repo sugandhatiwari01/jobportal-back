@@ -48,6 +48,17 @@ app.use(cors({
 // Explicitly handle OPTIONS requests for preflight
 app.options('*', cors());
 
+// Root Route (handles HEAD and GET requests to /)
+app.all('/', (req, res) => {
+  console.log('Root route accessed:', {
+    method: req.method,
+    url: req.url,
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers,
+  });
+  res.json({ message: 'Welcome to the Job Portal API' });
+});
+
 // Health Check Route (for Render)
 app.get('/health', (req, res) => {
   console.log('Health check requested:', {
