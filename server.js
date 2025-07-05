@@ -12,10 +12,26 @@ const app = express();
 
 // Middleware
 app.use(express.json());
+const cors = require('cors');
+
 app.use(cors({
-  origin: ['http://localhost:5173', '*.vercel.app'],
+  origin: (origin, callback) => {
+    // Allow requests with no origin (e.g., server-to-server or Postman)
+    if (!origin) return callback(null, true);
+    // Allow localhost for development and any .vercel.app domain
+    if (origin === 'http://localhost:5173' || origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+    // Reject other origins
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
+
+// Handle preflight requests for all routes
+app.options('*', cors());
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
