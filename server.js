@@ -24,6 +24,16 @@ app.use((req, res, next) => {
   next();
 });
 
+// Block suspicious URLs to prevent path-to-regexp errors
+app.use((req, res, next) => {
+  const url = req.url || '';
+  if (url.includes('git.new') || url.includes('pathToRegexpError')) {
+    console.warn('Blocked malformed URL:', { url, origin: req.get('Origin') || 'no-origin' });
+    return res.status(400).json({ message: 'Invalid request URL' });
+  }
+  next();
+});
+
 // CORS Configuration
 app.use(cors({
   origin: (origin, callback) => {
@@ -44,7 +54,7 @@ app.options('*', cors());
 
 // Health Check Route (for Render)
 app.get('/health', (req, res) => {
-  console.log('Health check requested', {
+  console.log('Health check requested:', {
     method: req.method,
     url: req.url,
     origin: req.get('Origin') || 'no-origin',
