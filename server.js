@@ -10,6 +10,23 @@ const { GridFSBucket } = require('mongodb');
 
 const app = express();
 
+// Block suspicious URLs first to prevent path-to-regexp errors
+app.use((req, res, next) => {
+  const url = req.url || '';
+  const fullUrl = req.originalUrl || url;
+  console.log('Early request check:', {
+    method: req.method,
+    url: fullUrl,
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers,
+  });
+  if (url.includes('git.new') || url.includes('pathToRegexpError')) {
+    console.warn('Blocked malformed URL:', { url: fullUrl, origin: req.get('Origin') || 'no-origin' });
+    return res.status(400).json({ message: 'Invalid request URL' });
+  }
+  next();
+});
+
 // Middleware
 app.use(express.json());
 
@@ -21,16 +38,6 @@ app.use((req, res, next) => {
     origin: req.get('Origin') || 'no-origin',
     headers: req.headers,
   });
-  next();
-});
-
-// Block suspicious URLs to prevent path-to-regexp errors
-app.use((req, res, next) => {
-  const url = req.url || '';
-  if (url.includes('git.new') || url.includes('pathToRegexpError')) {
-    console.warn('Blocked malformed URL:', { url, origin: req.get('Origin') || 'no-origin' });
-    return res.status(400).json({ message: 'Invalid request URL' });
-  }
   next();
 });
 
@@ -358,15 +365,19 @@ app.get('/api/profile', authenticate, async (req, res) => {
 
 app.get('/api/cv/:fileId', async (req, res) => {
   try {
-    const fileId = new mongoose.Types.ObjectId(req.params.fileId);
-    const file = await gfs.find({ _id: fileId }).toArray();
+    const fileId = req.params.fileId;
+    if (!mongoose.Types.ObjectId.isValid(fileId)) {
+      console.warn('Invalid fileId format:', fileId);
+      return res.status(400).json({ message: 'Invalid file ID format' });
+    }
+    const file = await gfs.find({ _id: new mongoose.Types.ObjectId(fileId) }).toArray();
 
     if (!file || file.length === 0) {
       return res.status(404).json({ message: 'File not found' });
     }
 
     res.set('Content-Type', file[0].contentType);
-    const downloadStream = gfs.openDownloadStream(fileId);
+    const downloadStream = gfs.openDownloadStream(new mongoose.Types.ObjectId(fileId));
     downloadStream.pipe(res);
 
     downloadStream.on('error', (err) => {
@@ -440,10 +451,15 @@ app.get('/api/admin/job-posts', authenticate, async (req, res) => {
 app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
-    const jobPost = await JobPost.findOne({ _id: req.params.id, postedBy: req.userId })
+    const jobPostId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+      console.warn('Invalid jobPostId format:', jobPostId);
+      return res.status(400).json({ message: 'Invalid job post ID format' });
+    }
+    const jobPost = await JobPost.findOne({ _id: jobPostId, postedBy: req.userId })
       .populate('postedBy', 'name email');
     if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized' });
-    console.log('Fetched job post:', req.params.id);
+    console.log('Fetched job post:', jobPostId);
     res.json(jobPost);
   } catch (err) {
     console.error('Fetch job post error:', err.message);
@@ -455,6 +471,10 @@ app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) 
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   try {
     const jobPostId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+      console.warn('Invalid jobPostId format:', jobPostId);
+      return res.status(400).json({ message: 'Invalid job post ID format' });
+    }
     const jobPost = await JobPost.findOne({ _id: jobPostId, postedBy: req.userId });
     if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized to view its applications' });
 
@@ -480,11 +500,15 @@ app.get('/api/jobs', async (req, res) => {
   }
 });
 
-app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
+app.post('/api/jobs/apply/:id', Matthenticate, async (req, res) => {
   const jobPostId = req.params.id;
   console.log('Job apply request:', { userId: req.userId, jobPostId });
 
   try {
+    if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+      console.warn('Invalid jobPostId format:', jobPostId);
+      return res.status(400).json({ message: 'Invalid job post ID format' });
+    }
     const user = await User.findById(req.userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
     if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
@@ -522,6 +546,17 @@ app.get('/api/user/applications', authenticate, async (req, res) => {
     console.error('Fetch user applications error:', err.message);
     res.status(500).json({ message: 'Server error', error: err.message });
   }
+});
+
+// Catch-all route for unmatched requests
+app.use((req, res) => {
+  console.warn('Unmatched route:', {
+    method: req.method,
+    url: req.url,
+    origin: req.get('Origin') || 'no-origin',
+    headers: req.headers,
+  });
+  res.status(404).json({ message: 'Route not found' });
 });
 
 // Global Error Handler
