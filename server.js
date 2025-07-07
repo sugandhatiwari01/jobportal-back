@@ -7,8 +7,16 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const multer = require('multer');
 const { GridFSBucket } = require('mongodb');
+const paypal = require('paypal-rest-sdk');
+const QRCode = require('qrcode');
 
 const app = express();
+
+paypal.configure({
+  mode: 'sandbox', // Change to 'live' for production
+  client_id: process.env.PAYPAL_CLIENT_ID,
+  client_secret: process.env.PAYPAL_CLIENT_SECRET,
+});
 
 // Middleware to block suspicious URLs (prevents path-to-regexp errors)
 app.use((req, res, next) => {
@@ -103,6 +111,20 @@ db.once('open', () => {
   console.log('GridFS initialized');
 });
 
+// Subscription Schema
+const subscriptionSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+  plan: { 
+    type: String, 
+    enum: ['basic', 'standard', 'premium', 'enterprise'], 
+    required: true 
+  },
+  applicantLimit: { type: Number, required: true },
+  paypalPaymentId: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+});
+const Subscription = mongoose.model('Subscription', subscriptionSchema);
+
 // User Schema
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
@@ -117,8 +139,8 @@ const userSchema = new mongoose.Schema({
   otpExpires: { type: Date },
   verified: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
+  subscription: { type: mongoose.Schema.Types.ObjectId, ref: 'Subscription' },
 });
-
 const User = mongoose.model('User', userSchema);
 
 // Job Post Schema
@@ -129,7 +151,6 @@ const jobPostSchema = new mongoose.Schema({
   postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   createdAt: { type: Date, default: Date.now },
 });
-
 const JobPost = mongoose.model('JobPost', jobPostSchema);
 
 // Application Schema
@@ -138,7 +159,6 @@ const applicationSchema = new mongoose.Schema({
   jobPostId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPost', required: true },
   appliedAt: { type: Date, default: Date.now },
 });
-
 const Application = mongoose.model('Application', applicationSchema);
 
 // US States for Validation
@@ -151,6 +171,14 @@ const usStates = [
   'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont',
   'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'
 ];
+
+// Subscription Plans
+const subscriptionPlans = {
+  basic: { applicantLimit: 100, price: 10.00 },
+  standard: { applicantLimit: 200, price: 20.00 },
+  premium: { applicantLimit: 500, price: 50.00 },
+  enterprise: { applicantLimit: 1000, price: 100.00 },
+};
 
 // Validation Functions
 const validateName = (name) => name && name.length >= 2;
@@ -184,6 +212,206 @@ const authenticate = async (req, res, next) => {
 
 // Routes
 try {
+  // Create PayPal Payment and Generate QR Code
+app.post('/api/subscription/checkout', authenticate, async (req, res) => {
+  const { plan } = req.body;
+  console.log('Subscription checkout request:', { userId: req.userId, plan });
+
+  // Validate environment variables
+  if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
+    console.error('PayPal configuration missing:', {
+      clientId: !!process.env.PAYPAL_CLIENT_ID,
+      clientSecret: !!process.env.PAYPAL_CLIENT_SECRET,
+    });
+    return res.status(500).json({ message: 'Server configuration error: Missing PayPal credentials' });
+  }
+  if (!process.env.FRONTEND_URL) {
+    console.error('FRONTEND_URL missing');
+    return res.status(500).json({ message: 'Server configuration error: Missing FRONTEND_URL' });
+  }
+
+  // Validate plan
+  if (!subscriptionPlans[plan]) {
+    console.warn('Invalid plan:', plan);
+    return res.status(400).json({ message: 'Invalid plan selected' });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      console.warn('User not found:', req.userId);
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (user.isAdmin) {
+      console.warn('User is already admin:', req.userId);
+      return res.status(400).json({ message: 'User is already an admin' });
+    }
+
+    const existingSubscription = await Subscription.findOne({ userId: req.userId });
+    if (existingSubscription) {
+      console.warn('User already has subscription:', req.userId);
+      return res.status(400).json({ message: 'User already has a subscription' });
+    }
+
+    // Use currency matching the merchant account (e.g., 'GBP' or 'USD')
+    const currency = 'USD'; // Change to 'GBP' if merchant account is UK-based
+    const payment = {
+      intent: 'sale',
+      payer: { payment_method: 'paypal' },
+      redirect_urls: {
+        return_url: `${process.env.FRONTEND_URL}/subscription/success`,
+        cancel_url: `${process.env.FRONTEND_URL}/subscription/cancel`,
+      },
+      transactions: [{
+        amount: {
+          currency: currency,
+          total: subscriptionPlans[plan].price.toFixed(2),
+        },
+        description: `${plan.charAt(0).toUpperCase() + plan.slice(1)} Plan - ${subscriptionPlans[plan].applicantLimit} applicants per job post`,
+        custom: JSON.stringify({ userId: req.userId.toString(), plan }),
+      }],
+    };
+
+    const paymentResult = await new Promise((resolve, reject) => {
+      paypal.payment.create(payment, (error, payment) => {
+        if (error) {
+          console.error('PayPal payment.create error:', JSON.stringify(error, null, 2));
+          reject(error);
+        } else {
+          resolve(payment);
+        }
+      });
+    });
+
+    const approvalUrl = paymentResult.links.find(link => link.rel === 'approval_url')?.href;
+    if (!approvalUrl) {
+      console.error('No approval URL in PayPal response:', paymentResult);
+      return res.status(500).json({ message: 'Failed to get PayPal approval URL' });
+    }
+
+    const qrCode = await QRCode.toDataURL(approvalUrl);
+    console.log('PayPal payment created:', { paymentId: paymentResult.id, approvalUrl, currency });
+
+    res.json({ paymentId: paymentResult.id, qrCode, approvalUrl });
+  } catch (err) {
+    console.error('Checkout error:', {
+      message: err.message,
+      stack: err.stack,
+      status: err.response?.status,
+      details: err.response?.data,
+    });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+  // Verify Payment and Activate Subscription
+  app.post('/api/subscription/verify', authenticate, async (req, res) => {
+    const { paymentId, payerId } = req.body;
+    console.log('Subscription verify request:', { userId: req.userId, paymentId, payerId });
+
+    try {
+      const paymentPromise = new Promise((resolve, reject) => {
+        paypal.payment.get(paymentId, (error, payment) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(payment);
+          }
+        });
+      });
+
+      const payment = await paymentPromise;
+      if (payment.state !== 'created') {
+        console.warn('Payment already processed:', paymentId);
+        return res.status(400).json({ message: 'Payment already processed' });
+      }
+
+      const custom = JSON.parse(payment.transactions[0].custom);
+      if (custom.userId !== req.userId.toString()) {
+        console.warn('User ID mismatch:', { paymentUserId: custom.userId, reqUserId: req.userId });
+        return res.status(403).json({ message: 'Unauthorized' });
+      }
+
+      const plan = custom.plan;
+      if (!subscriptionPlans[plan]) {
+        console.warn('Invalid plan in payment:', plan);
+        return res.status(400).json({ message: 'Invalid plan' });
+      }
+
+      const executePromise = new Promise((resolve, reject) => {
+        paypal.payment.execute(paymentId, { payer_id: payerId }, (error, payment) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(payment);
+          }
+        });
+      });
+
+      const executedPayment = await executePromise;
+      if (executedPayment.state !== 'approved') {
+        console.warn('Payment not approved:', paymentId);
+        return res.status(400).json({ message: 'Payment not approved' });
+      }
+
+      const subscription = new Subscription({
+        userId: req.userId,
+        plan,
+        applicantLimit: subscriptionPlans[plan].applicantLimit,
+        paypalPaymentId: paymentId,
+      });
+      await subscription.save();
+
+      const user = await User.findById(req.userId);
+      user.isAdmin = true;
+      user.subscription = subscription._id;
+      await user.save();
+
+      console.log('Subscription activated:', { userId: req.userId, plan, subscriptionId: subscription._id });
+      res.json({ message: 'Subscription activated successfully', plan });
+    } catch (err) {
+      console.error('Subscription verify error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Job Application Endpoint
+  app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
+    const jobPostId = req.params.id;
+    console.log('Job apply request:', { userId: req.userId, jobPostId });
+
+    try {
+      if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+        console.warn('Invalid jobPostId format:', jobPostId);
+        return res.status(400).json({ message: 'Invalid job post ID format' });
+      }
+      const user = await User.findById(req.userId);
+      if (!user) return res.status(404).json({ message: 'User not found' });
+      if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
+      if (!user.cvFileId) return res.status(400).json({ message: 'Please upload a CV in your profile' });
+
+      const jobPost = await JobPost.findById(jobPostId);
+      if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
+
+      const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
+      if (existingApplication) {
+        console.log('User already applied:', req.userId, jobPostId);
+        return res.status(400).json({ message: 'You have already applied to this job' });
+      }
+
+      const application = new Application({
+        userId: req.userId,
+        jobPostId,
+      });
+      await application.save();
+      console.log('Application submitted:', application._id);
+      res.json({ message: 'Application submitted successfully' });
+    } catch (err) {
+      console.error('Apply error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
   // Signup
   app.post('/api/signup', async (req, res) => {
     const { name, email, password } = req.body;
@@ -509,43 +737,6 @@ try {
       res.json(jobPosts);
     } catch (err) {
       console.error('Fetch jobs error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
-    }
-  });
-
-  // User: Apply to Job Post
-  app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
-    const jobPostId = req.params.id;
-    console.log('Job apply request:', { userId: req.userId, jobPostId });
-
-    try {
-      if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
-        console.warn('Invalid jobPostId format:', jobPostId);
-        return res.status(400).json({ message: 'Invalid job post ID format' });
-      }
-      const user = await User.findById(req.userId);
-      if (!user) return res.status(404).json({ message: 'User not found' });
-      if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
-      if (!user.cvFileId) return res.status(400).json({ message: 'Please upload a CV in your profile' });
-
-      const jobPost = await JobPost.findById(jobPostId);
-      if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
-
-      const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
-      if (existingApplication) {
-        console.log('User already applied:', req.userId, jobPostId);
-        return res.status(400).json({ message: 'You have already applied to this job' });
-      }
-
-      const application = new Application({
-        userId: req.userId,
-        jobPostId,
-      });
-      await application.save();
-      console.log('Application submitted:', application._id);
-      res.json({ message: 'Application submitted successfully' });
-    } catch (err) {
-      console.error('Apply error:', err.message);
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
