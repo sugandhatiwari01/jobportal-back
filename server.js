@@ -7,10 +7,18 @@ const nodemailer = require('nodemailer');
 const cors = require('cors');
 const multer = require('multer');
 const { GridFSBucket } = require('mongodb');
+const paypal = require('paypal-rest-sdk');
+const QRCode = require('qrcode');
 
 const app = express();
 
-// Middleware to block suspicious URLs (prevents path-to-regexp errors)
+paypal.configure({
+  mode: 'sandbox', // Change to 'live' for production
+  client_id: process.env.PAYPAL_CLIENT_ID,
+  client_secret: process.env.PAYPAL_CLIENT_SECRET,
+});
+
+// Middleware to block suspicious URLs
 app.use((req, res, next) => {
   const url = req.originalUrl || req.url || '';
   console.log('Incoming request:', {
@@ -33,7 +41,6 @@ app.use(express.json());
 app.use(cors({
   origin: (origin, callback) => {
     console.log('CORS Origin check:', { origin });
-    // Allow no origin (e.g., curl), localhost:5173, or *.vercel.app
     if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin)) {
       return callback(null, true);
     }
@@ -45,10 +52,9 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Explicitly handle OPTIONS requests for preflight
 app.options('*', cors());
 
-// Root Route (handles HEAD and GET requests to /)
+// Root Route
 app.all('/', (req, res) => {
   console.log('Root route accessed:', {
     method: req.method,
@@ -59,7 +65,7 @@ app.all('/', (req, res) => {
   res.json({ message: 'Welcome to the Job Portal API' });
 });
 
-// Health Check Route (for Render)
+// Health Check Route
 app.get('/health', (req, res) => {
   console.log('Health check requested:', {
     method: req.method,
@@ -78,7 +84,7 @@ mongoose.connect(process.env.MONGODB_URI)
 const db = mongoose.connection;
 let gfs;
 
-// Multer configuration for memory storage (for GridFS)
+// Multer configuration
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
@@ -97,11 +103,25 @@ const upload = multer({
   },
 });
 
-// Initialize GridFS after MongoDB connection
+// Initialize GridFS
 db.once('open', () => {
   gfs = new GridFSBucket(db.db, { bucketName: 'cvs' });
   console.log('GridFS initialized');
 });
+
+// Subscription Schema
+const subscriptionSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+  plan: { 
+    type: String, 
+    enum: ['free', 'basic', 'standard', 'premium', 'enterprise'], 
+    required: true 
+  },
+  applicantLimit: { type: Number, required: true },
+  paypalPaymentId: { type: String },
+  createdAt: { type: Date, default: Date.now },
+});
+const Subscription = mongoose.model('Subscription', subscriptionSchema);
 
 // User Schema
 const userSchema = new mongoose.Schema({
@@ -117,8 +137,8 @@ const userSchema = new mongoose.Schema({
   otpExpires: { type: Date },
   verified: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
+  subscription: { type: mongoose.Schema.Types.ObjectId, ref: 'Subscription' },
 });
-
 const User = mongoose.model('User', userSchema);
 
 // Job Post Schema
@@ -128,8 +148,8 @@ const jobPostSchema = new mongoose.Schema({
   location: { type: String, required: true },
   postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   createdAt: { type: Date, default: Date.now },
+  isActive: { type: Boolean, default: true },
 });
-
 const JobPost = mongoose.model('JobPost', jobPostSchema);
 
 // Application Schema
@@ -138,10 +158,9 @@ const applicationSchema = new mongoose.Schema({
   jobPostId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPost', required: true },
   appliedAt: { type: Date, default: Date.now },
 });
-
 const Application = mongoose.model('Application', applicationSchema);
 
-// US States for Validation
+// US States
 const usStates = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
   'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
@@ -151,6 +170,15 @@ const usStates = [
   'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas', 'Utah', 'Vermont',
   'Virginia', 'Washington', 'West Virginia', 'Wisconsin', 'Wyoming'
 ];
+
+// Subscription Plans
+const subscriptionPlans = {
+  free: { applicantLimit: 1, price: 0.00 },
+  basic: { applicantLimit: 100, price: 10.00 },
+  standard: { applicantLimit: 200, price: 20.00 },
+  premium: { applicantLimit: 500, price: 50.00 },
+  enterprise: { applicantLimit: 1000, price: 100.00 },
+};
 
 // Validation Functions
 const validateName = (name) => name && name.length >= 2;
@@ -184,6 +212,312 @@ const authenticate = async (req, res, next) => {
 
 // Routes
 try {
+  // Get Current Subscription
+  app.get('/api/subscription/current', authenticate, async (req, res) => {
+    try {
+      const subscription = await Subscription.findOne({ userId: req.userId });
+      if (!subscription) {
+        return res.status(404).json({ message: 'No subscription found' });
+      }
+      res.json({ plan: subscription.plan });
+    } catch (err) {
+      console.error('Fetch current subscription error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Create or Update Subscription
+  app.post('/api/subscription/checkout', authenticate, async (req, res) => {
+    const { plan } = req.body;
+    console.log('Subscription checkout request:', { userId: req.userId, plan });
+
+    // Validate plan
+    if (!subscriptionPlans[plan]) {
+      console.warn('Invalid plan:', plan);
+      return res.status(400).json({ message: 'Invalid plan selected' });
+    }
+
+    try {
+      const user = await User.findById(req.userId);
+      if (!user) {
+        console.warn('User not found:', req.userId);
+        return res.status(404).json({ message: 'User not found' });
+      }
+
+      if (plan === 'free') {
+        // Handle free plan
+        let subscription = await Subscription.findOne({ userId: req.userId });
+        if (subscription) {
+          // Update existing subscription
+          subscription.plan = 'free';
+          subscription.applicantLimit = subscriptionPlans.free.applicantLimit;
+          subscription.paypalPaymentId = null;
+          await subscription.save();
+        } else {
+          // Create new subscription
+          subscription = new Subscription({
+            userId: req.userId,
+            plan: 'free',
+            applicantLimit: subscriptionPlans.free.applicantLimit,
+            paypalPaymentId: null,
+          });
+          await subscription.save();
+          user.subscription = subscription._id;
+        }
+        user.isAdmin = true;
+        await user.save();
+
+        console.log('Free plan activated:', { userId: req.userId, subscriptionId: subscription._id });
+        return res.json({ message: 'Free plan activated successfully' });
+      }
+
+      // Handle paid plans
+      if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
+        console.error('PayPal configuration missing:', {
+          clientId: !!process.env.PAYPAL_CLIENT_ID,
+          clientSecret: !!process.env.PAYPAL_CLIENT_SECRET,
+        });
+        return res.status(500).json({ message: 'Server configuration error: Missing PayPal credentials' });
+      }
+      if (!process.env.FRONTEND_URL) {
+        console.error('FRONTEND_URL missing');
+        return res.status(500).json({ message: 'Server configuration error: Missing FRONTEND_URL' });
+      }
+
+      const currency = 'USD';
+      const payment = {
+        intent: 'sale',
+        payer: { payment_method: 'paypal' },
+        redirect_urls: {
+          return_url: `${process.env.FRONTEND_URL}/subscription/success`,
+          cancel_url: `${process.env.FRONTEND_URL}/subscription/cancel`,
+        },
+        transactions: [{
+          amount: {
+            currency: currency,
+            total: subscriptionPlans[plan].price.toFixed(2),
+          },
+          description: `${plan.charAt(0).toUpperCase() + plan.slice(1)} Plan - ${subscriptionPlans[plan].applicantLimit} applicants per job post`,
+          custom: JSON.stringify({ userId: req.userId.toString(), plan }),
+        }],
+      };
+
+      const paymentResult = await new Promise((resolve, reject) => {
+        paypal.payment.create(payment, (error, payment) => {
+          if (error) {
+            console.error('PayPal payment.create error:', JSON.stringify(error, null, 2));
+            reject(error);
+          } else {
+            resolve(payment);
+          }
+        });
+      });
+
+      const approvalUrl = paymentResult.links.find(link => link.rel === 'approval_url')?.href;
+      if (!approvalUrl) {
+        console.error('No approval URL in PayPal response:', paymentResult);
+        return res.status(500).json({ message: 'Failed to get PayPal approval URL' });
+      }
+
+      const qrCode = await QRCode.toDataURL(approvalUrl);
+      console.log('PayPal payment created:', { paymentId: paymentResult.id, approvalUrl, currency });
+
+      res.json({ paymentId: paymentResult.id, qrCode, approvalUrl });
+    } catch (err) {
+      console.error('Checkout error:', {
+        message: err.message,
+        stack: err.stack,
+        status: err.response?.status,
+        details: err.response?.data,
+      });
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Verify Payment and Update Subscription
+  app.post('/api/subscription/verify', authenticate, async (req, res) => {
+    const { paymentId, payerId } = req.body;
+    console.log('Subscription verify request:', { userId: req.userId, paymentId, payerId });
+
+    try {
+      const paymentPromise = new Promise((resolve, reject) => {
+        paypal.payment.get(paymentId, (error, payment) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(payment);
+          }
+        });
+      });
+
+      const payment = await paymentPromise;
+      if (payment.state !== 'created') {
+        console.warn('Payment already processed:', paymentId);
+        return res.status(400).json({ message: 'Payment already processed' });
+      }
+
+      const custom = JSON.parse(payment.transactions[0].custom);
+      if (custom.userId !== req.userId.toString()) {
+        console.warn('User ID mismatch:', { paymentUserId: custom.userId, reqUserId: req.userId });
+        return res.status(403).json({ message: 'Unauthorized' });
+      }
+
+      const plan = custom.plan;
+      if (!subscriptionPlans[plan]) {
+        console.warn('Invalid plan in payment:', plan);
+        return res.status(400).json({ message: 'Invalid plan' });
+      }
+
+      const executePromise = new Promise((resolve, reject) => {
+        paypal.payment.execute(paymentId, { payer_id: payerId }, (error, payment) => {
+          if (error) {
+            reject(error);
+          } else {
+            resolve(payment);
+          }
+        });
+      });
+
+      const executedPayment = await executePromise;
+      if (executedPayment.state !== 'approved') {
+        console.warn('Payment not approved:', paymentId);
+        return res.status(400).json({ message: 'Payment not approved' });
+      }
+
+      const user = await User.findById(req.userId);
+      let subscription = await Subscription.findOne({ userId: req.userId });
+      if (subscription) {
+        // Update existing subscription
+        subscription.plan = plan;
+        subscription.applicantLimit = subscriptionPlans[plan].applicantLimit;
+        subscription.paypalPaymentId = paymentId;
+        await subscription.save();
+      } else {
+        // Create new subscription
+        subscription = new Subscription({
+          userId: req.userId,
+          plan,
+          applicantLimit: subscriptionPlans[plan].applicantLimit,
+          paypalPaymentId: paymentId,
+        });
+        await subscription.save();
+        user.subscription = subscription._id;
+      }
+      user.isAdmin = true;
+      await user.save();
+
+      console.log('Subscription activated:', { userId: req.userId, plan, subscriptionId: subscription._id });
+      res.json({ message: 'Subscription activated successfully', plan });
+    } catch (err) {
+      console.error('Subscription verify error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Admin: Switch User Subscription
+  app.put('/api/admin/subscription/:userId', authenticate, async (req, res) => {
+    if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+    const { userId } = req.params;
+    const { plan } = req.body;
+    console.log('Switch subscription request:', { adminId: req.userId, userId, plan });
+
+    try {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        console.warn('Invalid userId format:', userId);
+        return res.status(400).json({ message: 'Invalid user ID format' });
+      }
+      if (!subscriptionPlans[plan]) {
+        console.warn('Invalid plan:', plan);
+        return res.status(400).json({ message: 'Invalid plan selected' });
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        console.warn('User not found:', userId);
+        return res.status(404).json({ message: 'User not found' });
+      }
+
+      let subscription = await Subscription.findOne({ userId });
+      if (!subscription) {
+        console.warn('No subscription found for user:', userId);
+        return res.status(400).json({ message: 'User has no active subscription' });
+      }
+
+      subscription.plan = plan;
+      subscription.applicantLimit = subscriptionPlans[plan].applicantLimit;
+      subscription.paypalPaymentId = plan === 'free' ? null : `ADMIN_UPDATED_${Date.now()}`;
+      await subscription.save();
+
+      user.isAdmin = true;
+      await user.save();
+
+      console.log('Subscription switched:', { userId, plan });
+      res.json({ message: 'Subscription switched successfully', plan });
+    } catch (err) {
+      console.error('Switch subscription error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Job Application Endpoint
+  app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
+    const jobPostId = req.params.id;
+    console.log('Job apply request:', { userId: req.userId, jobPostId });
+
+    try {
+      if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+        console.warn('Invalid jobPostId format:', jobPostId);
+        return res.status(400).json({ message: 'Invalid job post ID format' });
+      }
+      const user = await User.findById(req.userId);
+      if (!user) return res.status(404).json({ message: 'User not found' });
+      if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
+      if (!user.cvFileId) return res.status(400).json({ message: 'Please upload a CV in your profile' });
+
+      const jobPost = await JobPost.findById(jobPostId);
+      if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
+      if (!jobPost.isActive) return res.status(400).json({ message: 'This job post is no longer accepting applications' });
+
+      const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
+      if (existingApplication) {
+        console.log('User already applied:', req.userId, jobPostId);
+        return res.status(400).json({ message: 'You have already applied to this job' });
+      }
+
+      const admin = await User.findById(jobPost.postedBy);
+      if (!admin) return res.status(404).json({ message: 'Admin not found' });
+      const subscription = await Subscription.findOne({ userId: admin._id });
+      if (!subscription) return res.status(400).json({ message: 'Admin has no active subscription' });
+
+      const applicationCount = await Application.countDocuments({ jobPostId });
+      if (applicationCount >= subscription.applicantLimit) {
+        jobPost.isActive = false;
+        await jobPost.save();
+        console.log('Job post deactivated due to applicant limit:', jobPostId);
+        return res.status(400).json({ message: 'Applicant limit reached for this job post' });
+      }
+
+      const application = new Application({
+        userId: req.userId,
+        jobPostId,
+      });
+      await application.save();
+
+      const newApplicationCount = await Application.countDocuments({ jobPostId });
+      if (newApplicationCount >= subscription.applicantLimit) {
+        jobPost.isActive = false;
+        await jobPost.save();
+        console.log('Job post deactivated after application:', jobPostId);
+      }
+
+      console.log('Application submitted:', application._id);
+      res.json({ message: 'Application submitted successfully' });
+    } catch (err) {
+      console.error('Apply error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
   // Signup
   app.post('/api/signup', async (req, res) => {
     const { name, email, password } = req.body;
@@ -504,48 +838,11 @@ try {
   // User: Get All Job Posts
   app.get('/api/jobs', async (req, res) => {
     try {
-      const jobPosts = await JobPost.find().select('title description location createdAt');
+      const jobPosts = await JobPost.find({ isActive: true }).select('title description location createdAt');
       console.log('Fetched job posts for users:', jobPosts.length);
       res.json(jobPosts);
     } catch (err) {
       console.error('Fetch jobs error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
-    }
-  });
-
-  // User: Apply to Job Post
-  app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
-    const jobPostId = req.params.id;
-    console.log('Job apply request:', { userId: req.userId, jobPostId });
-
-    try {
-      if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
-        console.warn('Invalid jobPostId format:', jobPostId);
-        return res.status(400).json({ message: 'Invalid job post ID format' });
-      }
-      const user = await User.findById(req.userId);
-      if (!user) return res.status(404).json({ message: 'User not found' });
-      if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
-      if (!user.cvFileId) return res.status(400).json({ message: 'Please upload a CV in your profile' });
-
-      const jobPost = await JobPost.findById(jobPostId);
-      if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
-
-      const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
-      if (existingApplication) {
-        console.log('User already applied:', req.userId, jobPostId);
-        return res.status(400).json({ message: 'You have already applied to this job' });
-      }
-
-      const application = new Application({
-        userId: req.userId,
-        jobPostId,
-      });
-      await application.save();
-      console.log('Application submitted:', application._id);
-      res.json({ message: 'Application submitted successfully' });
-    } catch (err) {
-      console.error('Apply error:', err.message);
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
@@ -567,10 +864,10 @@ try {
     message: err.message,
     stack: err.stack,
   });
-  process.exit(1); // Exit to prevent running with broken routes
+  process.exit(1);
 }
 
-// Catch-all route for unmatched requests
+// Catch-all route
 app.use((req, res) => {
   console.warn('Unmatched route:', {
     method: req.method,
