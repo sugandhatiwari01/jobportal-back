@@ -18,7 +18,7 @@ paypal.configure({
   client_secret: process.env.PAYPAL_CLIENT_SECRET,
 });
 
-// Middleware to block suspicious URLs (prevents path-to-regexp errors)
+// Middleware to block suspicious URLs
 app.use((req, res, next) => {
   const url = req.originalUrl || req.url || '';
   console.log('Incoming request:', {
@@ -41,7 +41,6 @@ app.use(express.json());
 app.use(cors({
   origin: (origin, callback) => {
     console.log('CORS Origin check:', { origin });
-    // Allow no origin (e.g., curl), localhost:5173, or *.vercel.app
     if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin)) {
       return callback(null, true);
     }
@@ -53,10 +52,9 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 
-// Explicitly handle OPTIONS requests for preflight
 app.options('*', cors());
 
-// Root Route (handles HEAD and GET requests to /)
+// Root Route
 app.all('/', (req, res) => {
   console.log('Root route accessed:', {
     method: req.method,
@@ -67,7 +65,7 @@ app.all('/', (req, res) => {
   res.json({ message: 'Welcome to the Job Portal API' });
 });
 
-// Health Check Route (for Render)
+// Health Check Route
 app.get('/health', (req, res) => {
   console.log('Health check requested:', {
     method: req.method,
@@ -86,7 +84,7 @@ mongoose.connect(process.env.MONGODB_URI)
 const db = mongoose.connection;
 let gfs;
 
-// Multer configuration for memory storage (for GridFS)
+// Multer configuration
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
@@ -105,7 +103,7 @@ const upload = multer({
   },
 });
 
-// Initialize GridFS after MongoDB connection
+// Initialize GridFS
 db.once('open', () => {
   gfs = new GridFSBucket(db.db, { bucketName: 'cvs' });
   console.log('GridFS initialized');
@@ -116,11 +114,11 @@ const subscriptionSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
   plan: { 
     type: String, 
-    enum: ['basic', 'standard', 'premium', 'enterprise'], 
+    enum: ['free', 'basic', 'standard', 'premium', 'enterprise'], 
     required: true 
   },
   applicantLimit: { type: Number, required: true },
-  paypalPaymentId: { type: String, required: true },
+  paypalPaymentId: { type: String },
   createdAt: { type: Date, default: Date.now },
 });
 const Subscription = mongoose.model('Subscription', subscriptionSchema);
@@ -150,6 +148,7 @@ const jobPostSchema = new mongoose.Schema({
   location: { type: String, required: true },
   postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   createdAt: { type: Date, default: Date.now },
+  isActive: { type: Boolean, default: true },
 });
 const JobPost = mongoose.model('JobPost', jobPostSchema);
 
@@ -161,7 +160,7 @@ const applicationSchema = new mongoose.Schema({
 });
 const Application = mongoose.model('Application', applicationSchema);
 
-// US States for Validation
+// US States
 const usStates = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
   'Florida', 'Georgia', 'Hawaii', 'Idaho', 'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky',
@@ -174,6 +173,7 @@ const usStates = [
 
 // Subscription Plans
 const subscriptionPlans = {
+  free: { applicantLimit: 1, price: 0.00 },
   basic: { applicantLimit: 100, price: 10.00 },
   standard: { applicantLimit: 200, price: 20.00 },
   premium: { applicantLimit: 500, price: 50.00 },
@@ -212,99 +212,129 @@ const authenticate = async (req, res, next) => {
 
 // Routes
 try {
-  // Create PayPal Payment and Generate QR Code
-app.post('/api/subscription/checkout', authenticate, async (req, res) => {
-  const { plan } = req.body;
-  console.log('Subscription checkout request:', { userId: req.userId, plan });
-
-  // Validate environment variables
-  if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
-    console.error('PayPal configuration missing:', {
-      clientId: !!process.env.PAYPAL_CLIENT_ID,
-      clientSecret: !!process.env.PAYPAL_CLIENT_SECRET,
-    });
-    return res.status(500).json({ message: 'Server configuration error: Missing PayPal credentials' });
-  }
-  if (!process.env.FRONTEND_URL) {
-    console.error('FRONTEND_URL missing');
-    return res.status(500).json({ message: 'Server configuration error: Missing FRONTEND_URL' });
-  }
-
-  // Validate plan
-  if (!subscriptionPlans[plan]) {
-    console.warn('Invalid plan:', plan);
-    return res.status(400).json({ message: 'Invalid plan selected' });
-  }
-
-  try {
-    const user = await User.findById(req.userId);
-    if (!user) {
-      console.warn('User not found:', req.userId);
-      return res.status(404).json({ message: 'User not found' });
+  // Get Current Subscription
+  app.get('/api/subscription/current', authenticate, async (req, res) => {
+    try {
+      const subscription = await Subscription.findOne({ userId: req.userId });
+      if (!subscription) {
+        return res.status(404).json({ message: 'No subscription found' });
+      }
+      res.json({ plan: subscription.plan });
+    } catch (err) {
+      console.error('Fetch current subscription error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
     }
-    if (user.isAdmin) {
-      console.warn('User is already admin:', req.userId);
-      return res.status(400).json({ message: 'User is already an admin' });
+  });
+
+  // Create or Update Subscription
+  app.post('/api/subscription/checkout', authenticate, async (req, res) => {
+    const { plan } = req.body;
+    console.log('Subscription checkout request:', { userId: req.userId, plan });
+
+    // Validate plan
+    if (!subscriptionPlans[plan]) {
+      console.warn('Invalid plan:', plan);
+      return res.status(400).json({ message: 'Invalid plan selected' });
     }
 
-    const existingSubscription = await Subscription.findOne({ userId: req.userId });
-    if (existingSubscription) {
-      console.warn('User already has subscription:', req.userId);
-      return res.status(400).json({ message: 'User already has a subscription' });
-    }
+    try {
+      const user = await User.findById(req.userId);
+      if (!user) {
+        console.warn('User not found:', req.userId);
+        return res.status(404).json({ message: 'User not found' });
+      }
 
-    // Use currency matching the merchant account (e.g., 'GBP' or 'USD')
-    const currency = 'USD'; // Change to 'GBP' if merchant account is UK-based
-    const payment = {
-      intent: 'sale',
-      payer: { payment_method: 'paypal' },
-      redirect_urls: {
-        return_url: `${process.env.FRONTEND_URL}/subscription/success`,
-        cancel_url: `${process.env.FRONTEND_URL}/subscription/cancel`,
-      },
-      transactions: [{
-        amount: {
-          currency: currency,
-          total: subscriptionPlans[plan].price.toFixed(2),
-        },
-        description: `${plan.charAt(0).toUpperCase() + plan.slice(1)} Plan - ${subscriptionPlans[plan].applicantLimit} applicants per job post`,
-        custom: JSON.stringify({ userId: req.userId.toString(), plan }),
-      }],
-    };
-
-    const paymentResult = await new Promise((resolve, reject) => {
-      paypal.payment.create(payment, (error, payment) => {
-        if (error) {
-          console.error('PayPal payment.create error:', JSON.stringify(error, null, 2));
-          reject(error);
+      if (plan === 'free') {
+        // Handle free plan
+        let subscription = await Subscription.findOne({ userId: req.userId });
+        if (subscription) {
+          // Update existing subscription
+          subscription.plan = 'free';
+          subscription.applicantLimit = subscriptionPlans.free.applicantLimit;
+          subscription.paypalPaymentId = null;
+          await subscription.save();
         } else {
-          resolve(payment);
+          // Create new subscription
+          subscription = new Subscription({
+            userId: req.userId,
+            plan: 'free',
+            applicantLimit: subscriptionPlans.free.applicantLimit,
+            paypalPaymentId: null,
+          });
+          await subscription.save();
+          user.subscription = subscription._id;
         }
+        user.isAdmin = true;
+        await user.save();
+
+        console.log('Free plan activated:', { userId: req.userId, subscriptionId: subscription._id });
+        return res.json({ message: 'Free plan activated successfully' });
+      }
+
+      // Handle paid plans
+      if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
+        console.error('PayPal configuration missing:', {
+          clientId: !!process.env.PAYPAL_CLIENT_ID,
+          clientSecret: !!process.env.PAYPAL_CLIENT_SECRET,
+        });
+        return res.status(500).json({ message: 'Server configuration error: Missing PayPal credentials' });
+      }
+      if (!process.env.FRONTEND_URL) {
+        console.error('FRONTEND_URL missing');
+        return res.status(500).json({ message: 'Server configuration error: Missing FRONTEND_URL' });
+      }
+
+      const currency = 'USD';
+      const payment = {
+        intent: 'sale',
+        payer: { payment_method: 'paypal' },
+        redirect_urls: {
+          return_url: `${process.env.FRONTEND_URL}/subscription/success`,
+          cancel_url: `${process.env.FRONTEND_URL}/subscription/cancel`,
+        },
+        transactions: [{
+          amount: {
+            currency: currency,
+            total: subscriptionPlans[plan].price.toFixed(2),
+          },
+          description: `${plan.charAt(0).toUpperCase() + plan.slice(1)} Plan - ${subscriptionPlans[plan].applicantLimit} applicants per job post`,
+          custom: JSON.stringify({ userId: req.userId.toString(), plan }),
+        }],
+      };
+
+      const paymentResult = await new Promise((resolve, reject) => {
+        paypal.payment.create(payment, (error, payment) => {
+          if (error) {
+            console.error('PayPal payment.create error:', JSON.stringify(error, null, 2));
+            reject(error);
+          } else {
+            resolve(payment);
+          }
+        });
       });
-    });
 
-    const approvalUrl = paymentResult.links.find(link => link.rel === 'approval_url')?.href;
-    if (!approvalUrl) {
-      console.error('No approval URL in PayPal response:', paymentResult);
-      return res.status(500).json({ message: 'Failed to get PayPal approval URL' });
+      const approvalUrl = paymentResult.links.find(link => link.rel === 'approval_url')?.href;
+      if (!approvalUrl) {
+        console.error('No approval URL in PayPal response:', paymentResult);
+        return res.status(500).json({ message: 'Failed to get PayPal approval URL' });
+      }
+
+      const qrCode = await QRCode.toDataURL(approvalUrl);
+      console.log('PayPal payment created:', { paymentId: paymentResult.id, approvalUrl, currency });
+
+      res.json({ paymentId: paymentResult.id, qrCode, approvalUrl });
+    } catch (err) {
+      console.error('Checkout error:', {
+        message: err.message,
+        stack: err.stack,
+        status: err.response?.status,
+        details: err.response?.data,
+      });
+      res.status(500).json({ message: 'Server error', error: err.message });
     }
+  });
 
-    const qrCode = await QRCode.toDataURL(approvalUrl);
-    console.log('PayPal payment created:', { paymentId: paymentResult.id, approvalUrl, currency });
-
-    res.json({ paymentId: paymentResult.id, qrCode, approvalUrl });
-  } catch (err) {
-    console.error('Checkout error:', {
-      message: err.message,
-      stack: err.stack,
-      status: err.response?.status,
-      details: err.response?.data,
-    });
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
-
-  // Verify Payment and Activate Subscription
+  // Verify Payment and Update Subscription
   app.post('/api/subscription/verify', authenticate, async (req, res) => {
     const { paymentId, payerId } = req.body;
     console.log('Subscription verify request:', { userId: req.userId, paymentId, payerId });
@@ -354,23 +384,77 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
         return res.status(400).json({ message: 'Payment not approved' });
       }
 
-      const subscription = new Subscription({
-        userId: req.userId,
-        plan,
-        applicantLimit: subscriptionPlans[plan].applicantLimit,
-        paypalPaymentId: paymentId,
-      });
-      await subscription.save();
-
       const user = await User.findById(req.userId);
+      let subscription = await Subscription.findOne({ userId: req.userId });
+      if (subscription) {
+        // Update existing subscription
+        subscription.plan = plan;
+        subscription.applicantLimit = subscriptionPlans[plan].applicantLimit;
+        subscription.paypalPaymentId = paymentId;
+        await subscription.save();
+      } else {
+        // Create new subscription
+        subscription = new Subscription({
+          userId: req.userId,
+          plan,
+          applicantLimit: subscriptionPlans[plan].applicantLimit,
+          paypalPaymentId: paymentId,
+        });
+        await subscription.save();
+        user.subscription = subscription._id;
+      }
       user.isAdmin = true;
-      user.subscription = subscription._id;
       await user.save();
 
       console.log('Subscription activated:', { userId: req.userId, plan, subscriptionId: subscription._id });
       res.json({ message: 'Subscription activated successfully', plan });
     } catch (err) {
       console.error('Subscription verify error:', err.message);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Admin: Switch User Subscription
+  app.put('/api/admin/subscription/:userId', authenticate, async (req, res) => {
+    if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+    const { userId } = req.params;
+    const { plan } = req.body;
+    console.log('Switch subscription request:', { adminId: req.userId, userId, plan });
+
+    try {
+      if (!mongoose.Types.ObjectId.isValid(userId)) {
+        console.warn('Invalid userId format:', userId);
+        return res.status(400).json({ message: 'Invalid user ID format' });
+      }
+      if (!subscriptionPlans[plan]) {
+        console.warn('Invalid plan:', plan);
+        return res.status(400).json({ message: 'Invalid plan selected' });
+      }
+
+      const user = await User.findById(userId);
+      if (!user) {
+        console.warn('User not found:', userId);
+        return res.status(404).json({ message: 'User not found' });
+      }
+
+      let subscription = await Subscription.findOne({ userId });
+      if (!subscription) {
+        console.warn('No subscription found for user:', userId);
+        return res.status(400).json({ message: 'User has no active subscription' });
+      }
+
+      subscription.plan = plan;
+      subscription.applicantLimit = subscriptionPlans[plan].applicantLimit;
+      subscription.paypalPaymentId = plan === 'free' ? null : `ADMIN_UPDATED_${Date.now()}`;
+      await subscription.save();
+
+      user.isAdmin = true;
+      await user.save();
+
+      console.log('Subscription switched:', { userId, plan });
+      res.json({ message: 'Subscription switched successfully', plan });
+    } catch (err) {
+      console.error('Switch subscription error:', err.message);
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
@@ -392,6 +476,7 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
 
       const jobPost = await JobPost.findById(jobPostId);
       if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
+      if (!jobPost.isActive) return res.status(400).json({ message: 'This job post is no longer accepting applications' });
 
       const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
       if (existingApplication) {
@@ -399,11 +484,32 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
         return res.status(400).json({ message: 'You have already applied to this job' });
       }
 
+      const admin = await User.findById(jobPost.postedBy);
+      if (!admin) return res.status(404).json({ message: 'Admin not found' });
+      const subscription = await Subscription.findOne({ userId: admin._id });
+      if (!subscription) return res.status(400).json({ message: 'Admin has no active subscription' });
+
+      const applicationCount = await Application.countDocuments({ jobPostId });
+      if (applicationCount >= subscription.applicantLimit) {
+        jobPost.isActive = false;
+        await jobPost.save();
+        console.log('Job post deactivated due to applicant limit:', jobPostId);
+        return res.status(400).json({ message: 'Applicant limit reached for this job post' });
+      }
+
       const application = new Application({
         userId: req.userId,
         jobPostId,
       });
       await application.save();
+
+      const newApplicationCount = await Application.countDocuments({ jobPostId });
+      if (newApplicationCount >= subscription.applicantLimit) {
+        jobPost.isActive = false;
+        await jobPost.save();
+        console.log('Job post deactivated after application:', jobPostId);
+      }
+
       console.log('Application submitted:', application._id);
       res.json({ message: 'Application submitted successfully' });
     } catch (err) {
@@ -732,7 +838,7 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
   // User: Get All Job Posts
   app.get('/api/jobs', async (req, res) => {
     try {
-      const jobPosts = await JobPost.find().select('title description location createdAt');
+      const jobPosts = await JobPost.find({ isActive: true }).select('title description location createdAt');
       console.log('Fetched job posts for users:', jobPosts.length);
       res.json(jobPosts);
     } catch (err) {
@@ -758,10 +864,10 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
     message: err.message,
     stack: err.stack,
   });
-  process.exit(1); // Exit to prevent running with broken routes
+  process.exit(1);
 }
 
-// Catch-all route for unmatched requests
+// Catch-all route
 app.use((req, res) => {
   console.warn('Unmatched route:', {
     method: req.method,
