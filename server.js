@@ -41,7 +41,7 @@ app.use(express.json());
 app.use(cors({
   origin: (origin, callback) => {
     console.log('CORS Origin check:', { origin });
-    if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin)||'https://jobportal-front-beta.vercel.app') {
+    if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin) || origin === 'https://jobportal-front-beta.vercel.app') {
       return callback(null, true);
     }
     console.warn('Blocked origin:', { origin });
@@ -264,7 +264,7 @@ try {
           await subscription.save();
           user.subscription = subscription._id;
         }
-        user.isAdmin = true;
+        user.isAdmin = plan !== 'free'; // Set isAdmin based on plan
         await user.save();
 
         console.log('Free plan activated:', { userId: req.userId, subscriptionId: subscription._id });
@@ -403,58 +403,13 @@ try {
         await subscription.save();
         user.subscription = subscription._id;
       }
-      user.isAdmin = true;
+      user.isAdmin = plan !== 'free'; // Set isAdmin based on plan
       await user.save();
 
       console.log('Subscription activated:', { userId: req.userId, plan, subscriptionId: subscription._id });
       res.json({ message: 'Subscription activated successfully', plan });
     } catch (err) {
       console.error('Subscription verify error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
-    }
-  });
-
-  // Admin: Switch User Subscription
-  app.put('/api/admin/subscription/:userId', authenticate, async (req, res) => {
-    if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-    const { userId } = req.params;
-    const { plan } = req.body;
-    console.log('Switch subscription request:', { adminId: req.userId, userId, plan });
-
-    try {
-      if (!mongoose.Types.ObjectId.isValid(userId)) {
-        console.warn('Invalid userId format:', userId);
-        return res.status(400).json({ message: 'Invalid user ID format' });
-      }
-      if (!subscriptionPlans[plan]) {
-        console.warn('Invalid plan:', plan);
-        return res.status(400).json({ message: 'Invalid plan selected' });
-      }
-
-      const user = await User.findById(userId);
-      if (!user) {
-        console.warn('User not found:', userId);
-        return res.status(404).json({ message: 'User not found' });
-      }
-
-      let subscription = await Subscription.findOne({ userId });
-      if (!subscription) {
-        console.warn('No subscription found for user:', userId);
-        return res.status(400).json({ message: 'User has no active subscription' });
-      }
-
-      subscription.plan = plan;
-      subscription.applicantLimit = subscriptionPlans[plan].applicantLimit;
-      subscription.paypalPaymentId = plan === 'free' ? null : `ADMIN_UPDATED_${Date.now()}`;
-      await subscription.save();
-
-      user.isAdmin = true;
-      await user.save();
-
-      console.log('Subscription switched:', { userId, plan });
-      res.json({ message: 'Subscription switched successfully', plan });
-    } catch (err) {
-      console.error('Switch subscription error:', err.message);
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
@@ -554,9 +509,20 @@ try {
         city: 'Unknown',
         isAdmin: req.body.isAdmin || false,
       });
-      console.log('Saving user:', { name: user.name, email: user.email, state: user.state, city: user.city });
       await user.save();
-      console.log('User saved:', user._id);
+
+      // Create default free subscription
+      const subscription = new Subscription({
+        userId: user._id,
+        plan: 'free',
+        applicantLimit: subscriptionPlans.free.applicantLimit,
+        paypalPaymentId: null,
+      });
+      await subscription.save();
+      user.subscription = subscription._id;
+      await user.save();
+
+      console.log('User and subscription saved:', { userId: user._id, subscriptionId: subscription._id });
 
       const transporter = nodemailer.createTransport({
         service: 'gmail',
