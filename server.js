@@ -227,112 +227,165 @@ try {
   });
 
   // Create or Update Subscription
-  app.post('/api/subscription/checkout', authenticate, async (req, res) => {
-    const { plan } = req.body;
-    console.log('Subscription checkout request:', { userId: req.userId, plan });
+app.post('/api/subscription/checkout', authenticate, async (req, res) => {
+  const { plan } = req.body;
+  console.log('Subscription checkout request:', { userId: req.userId, plan });
 
-    // Validate plan
-    if (!subscriptionPlans[plan]) {
-      console.warn('Invalid plan:', plan);
-      return res.status(400).json({ message: 'Invalid plan selected' });
+  // Validate plan
+  if (!subscriptionPlans[plan]) {
+    console.warn('Invalid plan:', plan);
+    return res.status(400).json({ message: 'Invalid plan selected' });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      console.warn('User not found:', req.userId);
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    try {
-      const user = await User.findById(req.userId);
-      if (!user) {
-        console.warn('User not found:', req.userId);
-        return res.status(404).json({ message: 'User not found' });
-      }
-
-      if (plan === 'free') {
-        // Handle free plan
-        let subscription = await Subscription.findOne({ userId: req.userId });
-        if (subscription) {
-          // Update existing subscription
-          subscription.plan = 'free';
-          subscription.applicantLimit = subscriptionPlans.free.applicantLimit;
-          subscription.paypalPaymentId = null;
-          await subscription.save();
-        } else {
-          // Create new subscription
-          subscription = new Subscription({
-            userId: req.userId,
-            plan: 'free',
-            applicantLimit: subscriptionPlans.free.applicantLimit,
-            paypalPaymentId: null,
-          });
-          await subscription.save();
-          user.subscription = subscription._id;
-        }
-        user.isAdmin = plan !== 'free'; // Set isAdmin based on plan
-        await user.save();
-
-        console.log('Free plan activated:', { userId: req.userId, subscriptionId: subscription._id });
-        return res.json({ message: 'Free plan activated successfully' });
-      }
-
-      // Handle paid plans
-      if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
-        console.error('PayPal configuration missing:', {
-          clientId: !!process.env.PAYPAL_CLIENT_ID,
-          clientSecret: !!process.env.PAYPAL_CLIENT_SECRET,
+    if (plan === 'free') {
+      // Handle free trial
+      let subscription = await Subscription.findOne({ userId: req.userId });
+      if (subscription) {
+        // Update existing subscription
+        subscription.plan = 'free';
+        subscription.applicantLimit = subscriptionPlans.free.applicantLimit;
+        subscription.paypalPaymentId = null;
+        await subscription.save();
+        console.log('Updated subscription to free trial:', { subscriptionId: subscription._id });
+      } else {
+        // Create new subscription
+        subscription = new Subscription({
+          userId: req.userId,
+          plan: 'free',
+          applicantLimit: subscriptionPlans.free.applicantLimit,
+          paypalPaymentId: null,
         });
-        return res.status(500).json({ message: 'Server configuration error: Missing PayPal credentials' });
+        await subscription.save();
+        user.subscription = subscription._id;
+        await user.save(); // Save user after updating subscription reference
+        console.log('Created new free trial subscription:', { subscriptionId: subscription._id });
       }
-      if (!process.env.FRONTEND_URL) {
-        console.error('FRONTEND_URL missing');
-        return res.status(500).json({ message: 'Server configuration error: Missing FRONTEND_URL' });
-      }
+      user.isAdmin = true; // Allow job posting for all plans, including free trial
+      await user.save();
+      console.log('Free trial activated:', { userId: req.userId, isAdmin: user.isAdmin });
+      return res.json({ message: 'Free trial activated successfully' });
+    }
 
-      const currency = 'USD';
-      const payment = {
-        intent: 'sale',
-        payer: { payment_method: 'paypal' },
-        redirect_urls: {
-          return_url: `${process.env.FRONTEND_URL}/subscription/success`,
-          cancel_url: `${process.env.FRONTEND_URL}/subscription/cancel`,
+    // Handle paid plans
+    if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
+      console.error('PayPal configuration missing:', {
+        clientId: !!process.env.PAYPAL_CLIENT_ID,
+        clientSecret: !!process.env.PAYPAL_CLIENT_SECRET,
+      });
+      return res.status(500).json({ message: 'Server configuration error: Missing PayPal credentials' });
+    }
+    if (!process.env.FRONTEND_URL) {
+      console.error('FRONTEND_URL missing');
+      return res.status(500).json({ message: 'Server configuration error: Missing FRONTEND_URL' });
+    }
+
+    const currency = 'USD';
+    const payment = {
+      intent: 'sale',
+      payer: { payment_method: 'paypal' },
+      redirect_urls: {
+        return_url: `${process.env.FRONTEND_URL}/subscription/success`,
+        cancel_url: `${process.env.FRONTEND_URL}/subscription/cancel`,
+      },
+      transactions: [{
+        amount: {
+          currency: currency,
+          total: subscriptionPlans[plan].price.toFixed(2),
         },
-        transactions: [{
-          amount: {
-            currency: currency,
-            total: subscriptionPlans[plan].price.toFixed(2),
-          },
-          description: `${plan.charAt(0).toUpperCase() + plan.slice(1)} Plan - ${subscriptionPlans[plan].applicantLimit} applicants per job post`,
-          custom: JSON.stringify({ userId: req.userId.toString(), plan }),
-        }],
-      };
+        description: `${plan.charAt(0).toUpperCase() + plan.slice(1)} Plan - ${subscriptionPlans[plan].applicantLimit} applicants per job post`,
+        custom: JSON.stringify({ userId: req.userId.toString(), plan }),
+      }],
+    };
 
-      const paymentResult = await new Promise((resolve, reject) => {
-        paypal.payment.create(payment, (error, payment) => {
-          if (error) {
-            console.error('PayPal payment.create error:', JSON.stringify(error, null, 2));
-            reject(error);
-          } else {
-            resolve(payment);
-          }
-        });
+    const paymentResult = await new Promise((resolve, reject) => {
+      paypal.payment.create(payment, (error, payment) => {
+        if (error) {
+          console.error('PayPal payment.create error:', JSON.stringify(error, null, 2));
+          reject(error);
+        } else {
+          resolve(payment);
+        }
       });
+    });
 
-      const approvalUrl = paymentResult.links.find(link => link.rel === 'approval_url')?.href;
-      if (!approvalUrl) {
-        console.error('No approval URL in PayPal response:', paymentResult);
-        return res.status(500).json({ message: 'Failed to get PayPal approval URL' });
-      }
-
-      const qrCode = await QRCode.toDataURL(approvalUrl);
-      console.log('PayPal payment created:', { paymentId: paymentResult.id, approvalUrl, currency });
-
-      res.json({ paymentId: paymentResult.id, qrCode, approvalUrl });
-    } catch (err) {
-      console.error('Checkout error:', {
-        message: err.message,
-        stack: err.stack,
-        status: err.response?.status,
-        details: err.response?.data,
-      });
-      res.status(500).json({ message: 'Server error', error: err.message });
+    const approvalUrl = paymentResult.links.find(link => link.rel === 'approval_url')?.href;
+    if (!approvalUrl) {
+      console.error('No approval URL in PayPal response:', paymentResult);
+      return res.status(500).json({ message: 'Failed to get PayPal approval URL' });
     }
-  });
+
+    const qrCode = await QRCode.toDataURL(approvalUrl);
+    console.log('PayPal payment created:', { paymentId: paymentResult.id, approvalUrl, currency });
+
+    res.json({ paymentId: paymentResult.id, qrCode, approvalUrl });
+  } catch (err) {
+    console.error('Checkout error:', {
+      message: err.message,
+      stack: err.stack,
+      status: err.response?.status,
+      details: err.response?.data,
+    });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+app.post('/api/admin/job-posts', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+
+  const { title, description, location } = req.body;
+  console.log('Create job post request:', { title, location, userId: req.userId });
+
+  const errors = {};
+  if (!validateJobPost(title, description, location)) {
+    errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
+  }
+
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
+
+  try {
+    const user = await User.findById(req.userId).populate('subscription');
+    if (!user.subscription) {
+      console.warn('No subscription found for user:', req.userId);
+      return res.status(400).json({ message: 'No active subscription. Please choose a plan.' });
+    }
+
+    // For free trial, limit to one active job post
+    if (user.subscription.plan === 'free') {
+      const activeJobCount = await JobPost.countDocuments({
+        postedBy: req.userId,
+        isActive: true,
+      });
+      if (activeJobCount >= 1) {
+        console.warn('Free trial job post limit reached:', { userId: req.userId });
+        return res.status(400).json({ message: 'Free trial allows only one active job post.' });
+      }
+    }
+
+    const jobPost = new JobPost({
+      title: title.trim(),
+      description: description.trim(),
+      location: location.trim(),
+      postedBy: req.userId,
+    });
+    await jobPost.save();
+    await jobPost.populate('postedBy', 'name email');
+    console.log('Job post created:', jobPost._id);
+    res.json({ message: 'Job post created successfully', jobPost });
+  } catch (err) {
+    console.error('Create job post error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 
   // Verify Payment and Update Subscription
   app.post('/api/subscription/verify', authenticate, async (req, res) => {
@@ -474,79 +527,69 @@ try {
   });
 
   // Signup
-  app.post('/api/signup', async (req, res) => {
-    const { name, email, password } = req.body;
-    console.log('Signup request:', { name, email });
+app.post('/api/signup', async (req, res) => {
+  const { name, email, password } = req.body;
+  console.log('Signup request:', { name, email });
 
-    const errors = {};
-    if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
-    if (!validateEmail(email)) errors.email = 'Invalid email format';
-    if (!validatePassword(password))
-      errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
+  const errors = {};
+  if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
+  if (!validateEmail(email)) errors.email = 'Invalid email format';
+  if (!validatePassword(password))
+    errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
 
-    if (Object.keys(errors).length > 0) {
-      console.log('Validation errors:', errors);
-      return res.status(400).json({ errors });
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ errors });
+  }
+
+  try {
+    const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
+    if (existingUser) {
+      console.log('Email already exists:', email);
+      return res.status(400).json({ message: 'Email already exists' });
     }
 
-    try {
-      const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
-      if (existingUser) {
-        console.log('Email already exists:', email);
-        return res.status(400).json({ message: 'Email already exists' });
-      }
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log('Generated OTP:', otp);
+    const hashedPassword = await bcrypt.hash(password.trim(), 10);
+    const user = new User({
+      name: name.trim(),
+      email: email.trim().toLowerCase(),
+      password: hashedPassword,
+      otp,
+      otpExpires: Date.now() + 10 * 60 * 1000,
+      state: 'Unknown',
+      city: 'Unknown',
+      isAdmin: false, // Default to false for new users
+      subscription: null, // No default subscription
+    });
+    await user.save();
 
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      console.log('Generated OTP:', otp);
-      const hashedPassword = await bcrypt.hash(password.trim(), 10);
-      const user = new User({
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-        password: hashedPassword,
-        otp,
-        otpExpires: Date.now() + 10 * 60 * 1000,
-        state: 'Unknown',
-        city: 'Unknown',
-        isAdmin: req.body.isAdmin || false,
-      });
-      await user.save();
+    console.log('User saved:', { userId: user._id });
 
-      // Create default free subscription
-      const subscription = new Subscription({
-        userId: user._id,
-        plan: 'free',
-        applicantLimit: subscriptionPlans.free.applicantLimit,
-        paypalPaymentId: null,
-      });
-      await subscription.save();
-      user.subscription = subscription._id;
-      await user.save();
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
 
-      console.log('User and subscription saved:', { userId: user._id, subscriptionId: subscription._id });
+    console.log('Sending email to:', email);
+    await transporter.sendMail({
+      from: `"User Profile App" <${process.env.EMAIL_USER}>`,
+      to: email.trim().toLowerCase(),
+      subject: 'Your OTP Code',
+      text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
+    });
+    console.log('Email sent successfully');
 
-      const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_PASS,
-        },
-      });
-
-      console.log('Sending email to:', email);
-      await transporter.sendMail({
-        from: `"User Profile App" <${process.env.EMAIL_USER}>`,
-        to: email.trim().toLowerCase(),
-        subject: 'Your OTP Code',
-        text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
-      });
-      console.log('Email sent successfully');
-
-      res.json({ message: 'OTP sent to email. Please verify.' });
-    } catch (err) {
-      console.error('Signup error:', err.message, err.stack);
-      res.status(500).json({ message: 'Server error', error: err.message });
-    }
-  });
+    res.json({ message: 'OTP sent to email. Please verify.' });
+  } catch (err) {
+    console.error('Signup error:', err.message, err.stack);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 
   // OTP Verification
   app.post('/api/verify-otp', async (req, res) => {
@@ -800,7 +843,61 @@ try {
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
+app.post('/api/resend-otp', async (req, res) => {
+  const { email } = req.body;
+  console.log('Resend OTP request:', { email });
 
+  // Validate email
+  if (!validateEmail(email)) {
+    console.warn('Invalid email format:', email);
+    return res.status(400).json({ message: 'Invalid email format' });
+  }
+
+  try {
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) {
+      console.warn('User not found:', email);
+      return res.status(400).json({ message: 'User not found' });
+    }
+    if (user.verified) {
+      console.warn('User already verified:', email);
+      return res.status(400).json({ message: 'User already verified' });
+    }
+
+    // Generate new OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log('Generated new OTP:', otp);
+    user.otp = otp;
+    user.otpExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
+    await user.save();
+
+    // Send OTP email
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    console.log('Sending email to:', email);
+    await transporter.sendMail({
+      from: `"User Profile App" <${process.env.EMAIL_USER}>`,
+      to: email.trim().toLowerCase(),
+      subject: 'Your OTP Code',
+      text: `Your new OTP code is ${otp}. It expires in 10 minutes.`,
+    });
+    console.log('Email sent successfully');
+
+    res.json({ message: 'New OTP sent to email. Please verify.' });
+  } catch (err) {
+    console.error('Resend OTP error:', {
+      message: err.message,
+      stack: err.stack,
+    });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
   // User: Get All Job Posts
   app.get('/api/jobs', async (req, res) => {
     try {
