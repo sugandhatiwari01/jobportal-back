@@ -41,7 +41,7 @@ app.use(express.json());
 app.use(cors({
   origin: (origin, callback) => {
     console.log('CORS Origin check:', { origin });
-    if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin) || origin === 'https://jobportal-front-beta.vercel.app') {
+    if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin) ||  'https://jobportal-front-beta.vercel.app') {
       return callback(null, true);
     }
     console.warn('Blocked origin:', { origin });
