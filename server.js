@@ -9,11 +9,12 @@ const multer = require('multer');
 const { GridFSBucket } = require('mongodb');
 const paypal = require('paypal-rest-sdk');
 const QRCode = require('qrcode');
+const path = require('path');
 
 const app = express();
 
 paypal.configure({
-  mode: 'sandbox', // Change to 'live' for production
+  mode: 'sandbox',
   client_id: process.env.PAYPAL_CLIENT_ID,
   client_secret: process.env.PAYPAL_CLIENT_SECRET,
 });
@@ -41,7 +42,8 @@ app.use(express.json());
 app.use(cors({
   origin: (origin, callback) => {
     console.log('CORS Origin check:', { origin });
-    if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin) || 'https://jobportal-front-beta.vercel.app'|| 'https://staffing.centennialinfotech.com') {
+    if (!origin || origin === 'http://localhost:5173' || /\.vercel\.app$/.test(origin) || origin === 'https://jobportal-front-beta.vercel.app' || origin === 'https://staffing.centennialinfotech.com') {
+
       return callback(null, true);
     }
     console.warn('Blocked origin:', { origin });
@@ -88,20 +90,44 @@ let gfs;
 const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter: (req, file, cb) => {
-    const allowedTypes = [
-      'application/pdf',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    ];
-    if (!allowedTypes.includes(file.mimetype)) {
-      return cb(new Error('Invalid file type. Only PDF, DOC, or DOCX allowed.'), false);
+    const logoAllowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    const allowedExts = ['.jpg', '.jpeg', '.png', '.gif', '.webp'];
+    console.log('Multer file received:', {
+      fieldname: file.fieldname,
+      mimetype: file.mimetype,
+      originalname: file.originalname,
+      size: file.size,
+    });
+    if (
+      file.fieldname === 'companyLogo' &&
+      (!logoAllowedTypes.includes(file.mimetype) || !allowedExts.includes(ext))
+    ) {
+      return cb(
+        new Error('Invalid file type for company logo. Only JPEG, PNG, GIF, or WebP allowed.'),
+        false
+      );
     }
     if (file.size > 2 * 1024 * 1024) {
       return cb(new Error('File size must be less than 2MB.'), false);
     }
+    // Remove the strict size check for undefined or zero
     cb(null, true);
   },
 });
+
+// Multer error handling middleware
+const handleMulterError = (err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    console.error('Multer error:', { message: err.message, field: err.field });
+    return res.status(400).json({ message: 'File upload error', error: err.message });
+  }
+  if (err) {
+    console.error('File filter error:', { message: err.message });
+    return res.status(400).json({ message: 'File validation failed', error: err.message });
+  }
+  next();
+};
 
 // Initialize GridFS
 db.once('open', () => {
@@ -133,6 +159,9 @@ const userSchema = new mongoose.Schema({
   city: { type: String, required: true, default: 'Unknown' },
   houseNoStreet: { type: String },
   cvFileId: { type: mongoose.Types.ObjectId, ref: 'cvs.files' },
+  companyName: { type: String }, // Admin-specific
+  companyPhone: { type: String }, // Admin-specific
+  companyLogo: { type: mongoose.Types.ObjectId, ref: 'cvs.files' }, // Admin-specific, stored in GridFS
   otp: { type: String },
   otpExpires: { type: Date },
   verified: { type: Boolean, default: false },
@@ -185,7 +214,7 @@ const validateName = (name) => name && name.length >= 2;
 const validateEmail = (email) => /\S+@\S+\.\S+/.test(email);
 const validatePassword = (password) =>
   /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/.test(password);
-const validatePhone = (phone) => !phone || /^\d{10}$/.test(phone);
+const validatePhone = (phone) => !phone || /^\+?\d{10,15}$/.test(phone);
 const validateState = (state) => state && usStates.includes(state);
 const validateCity = (city) => city && city.length >= 2;
 const validateHouseNoStreet = (houseNoStreet) => !houseNoStreet || houseNoStreet.length >= 5;
@@ -212,26 +241,39 @@ const authenticate = async (req, res, next) => {
 
 // Routes
 try {
-  // Get Current Subscription
-  app.get('/api/subscription/current', authenticate, async (req, res) => {
-    try {
-      const subscription = await Subscription.findOne({ userId: req.userId });
-      if (!subscription) {
-        return res.status(404).json({ message: 'No subscription found' });
-      }
-      res.json({ plan: subscription.plan });
-    } catch (err) {
-      console.error('Fetch current subscription error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
+  // Update the /api/subscription/current endpoint
+app.get('/api/subscription/current', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).populate('subscription');
+    if (!user) {
+      console.warn('User not found for subscription fetch:', req.userId);
+      return res.status(404).json({ message: 'User not found' });
     }
-  });
-
+    if (!user.subscription) {
+      console.log('No subscription found for user:', req.userId);
+      return res.json({ plan: null, isActive: false, isAdmin: user.isAdmin });
+    }
+    const subscription = user.subscription;
+    console.log('Fetched subscription:', { userId: req.userId, plan: subscription.plan, isAdmin: user.isAdmin });
+    res.json({
+      plan: subscription.plan,
+      isActive: subscription.plan !== 'free',
+      isAdmin: user.isAdmin,
+    });
+  } catch (err) {
+    console.error('Get subscription error:', {
+      message: err.message,
+      stack: err.stack,
+      userId: req.userId,
+    });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
   // Create or Update Subscription
 app.post('/api/subscription/checkout', authenticate, async (req, res) => {
   const { plan } = req.body;
   console.log('Subscription checkout request:', { userId: req.userId, plan });
 
-  // Validate plan
   if (!subscriptionPlans[plan]) {
     console.warn('Invalid plan:', plan);
     return res.status(400).json({ message: 'Invalid plan selected' });
@@ -244,36 +286,47 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    if (plan === 'free') {
-      // Handle free trial
-      let subscription = await Subscription.findOne({ userId: req.userId });
-      if (subscription) {
-        // Update existing subscription
-        subscription.plan = 'free';
-        subscription.applicantLimit = subscriptionPlans.free.applicantLimit;
-        subscription.paypalPaymentId = null;
-        await subscription.save();
-        console.log('Updated subscription to free trial:', { subscriptionId: subscription._id });
-      } else {
-        // Create new subscription
-        subscription = new Subscription({
-          userId: req.userId,
-          plan: 'free',
-          applicantLimit: subscriptionPlans.free.applicantLimit,
-          paypalPaymentId: null,
-        });
-        await subscription.save();
-        user.subscription = subscription._id;
-        await user.save(); // Save user after updating subscription reference
-        console.log('Created new free trial subscription:', { subscriptionId: subscription._id });
-      }
-      user.isAdmin = true; // Allow job posting for all plans, including free trial
-      await user.save();
-      console.log('Free trial activated:', { userId: req.userId, isAdmin: user.isAdmin });
-      return res.json({ message: 'Free trial activated successfully' });
+    // Check if admin has completed profile (companyName and companyLogo)
+    if (user.isAdmin && (!user.companyName || !user.companyLogo)) {
+      console.warn('Incomplete admin profile:', { userId: req.userId, companyName: !!user.companyName, companyLogo: !!user.companyLogo });
+      return res.status(400).json({ message: 'Please complete your company profile (name and logo) before subscribing.' });
     }
 
-    // Handle paid plans
+    if (plan === 'free') {
+      let subscription = await Subscription.findOne({ userId: req.userId });
+      try {
+        if (subscription) {
+          subscription.plan = 'free';
+          subscription.applicantLimit = subscriptionPlans.free.applicantLimit;
+          subscription.paypalPaymentId = null;
+          await subscription.save();
+          console.log('Updated subscription to free trial:', { subscriptionId: subscription._id, applicantLimit: subscription.applicantLimit });
+        } else {
+          subscription = new Subscription({
+            userId: req.userId,
+            plan: 'free',
+            applicantLimit: subscriptionPlans.free.applicantLimit,
+            paypalPaymentId: null,
+          });
+          await subscription.save();
+          user.subscription = subscription._id;
+          console.log('Created new free trial subscription:', { subscriptionId: subscription._id, applicantLimit: subscription.applicantLimit });
+        }
+        user.isAdmin = true;
+        await user.save();
+        console.log('Free trial activated:', { userId: req.userId, isAdmin: user.isAdmin, subscriptionId: user.subscription });
+      } catch (err) {
+        console.error('Error saving subscription or user:', {
+          message: err.message,
+          stack: err.stack,
+          userId: req.userId,
+          plan,
+        });
+        return res.status(500).json({ message: 'Failed to activate free trial due to database error', error: err.message });
+      }
+      return res.json({ message: 'Free trial activated successfully', plan: 'free', isAdmin: user.isAdmin });
+    }
+
     if (!process.env.PAYPAL_CLIENT_ID || !process.env.PAYPAL_CLIENT_SECRET) {
       console.error('PayPal configuration missing:', {
         clientId: !!process.env.PAYPAL_CLIENT_ID,
@@ -332,58 +385,7 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
       status: err.response?.status,
       details: err.response?.data,
     });
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
-
-app.post('/api/admin/job-posts', authenticate, async (req, res) => {
-  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-
-  const { title, description, location } = req.body;
-  console.log('Create job post request:', { title, location, userId: req.userId });
-
-  const errors = {};
-  if (!validateJobPost(title, description, location)) {
-    errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
-  }
-
-  if (Object.keys(errors).length > 0) {
-    console.log('Validation errors:', errors);
-    return res.status(400).json({ message: 'Validation failed', errors });
-  }
-
-  try {
-    const user = await User.findById(req.userId).populate('subscription');
-    if (!user.subscription) {
-      console.warn('No subscription found for user:', req.userId);
-      return res.status(400).json({ message: 'No active subscription. Please choose a plan.' });
-    }
-
-    // For free trial, limit to one active job post
-    if (user.subscription.plan === 'free') {
-      const activeJobCount = await JobPost.countDocuments({
-        postedBy: req.userId,
-        isActive: true,
-      });
-      if (activeJobCount >= 1) {
-        console.warn('Free trial job post limit reached:', { userId: req.userId });
-        return res.status(400).json({ message: 'Free trial allows only one active job post.' });
-      }
-    }
-
-    const jobPost = new JobPost({
-      title: title.trim(),
-      description: description.trim(),
-      location: location.trim(),
-      postedBy: req.userId,
-    });
-    await jobPost.save();
-    await jobPost.populate('postedBy', 'name email');
-    console.log('Job post created:', jobPost._id);
-    res.json({ message: 'Job post created successfully', jobPost });
-  } catch (err) {
-    console.error('Create job post error:', err.message);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({ message: 'Server error during subscription activation', error: err.message });
   }
 });
 
@@ -440,13 +442,11 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       const user = await User.findById(req.userId);
       let subscription = await Subscription.findOne({ userId: req.userId });
       if (subscription) {
-        // Update existing subscription
         subscription.plan = plan;
         subscription.applicantLimit = subscriptionPlans[plan].applicantLimit;
         subscription.paypalPaymentId = paymentId;
         await subscription.save();
       } else {
-        // Create new subscription
         subscription = new Subscription({
           userId: req.userId,
           plan,
@@ -456,7 +456,7 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
         await subscription.save();
         user.subscription = subscription._id;
       }
-      user.isAdmin = plan !== 'free'; // Set isAdmin based on plan
+      user.isAdmin = plan !== 'free';
       await user.save();
 
       console.log('Subscription activated:', { userId: req.userId, plan, subscriptionId: subscription._id });
@@ -527,69 +527,134 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   });
 
   // Signup
-app.post('/api/signup', async (req, res) => {
-  const { name, email, password } = req.body;
-  console.log('Signup request:', { name, email });
+  app.post('/api/signup', async (req, res) => {
+    const { name, email, password } = req.body;
+    console.log('Signup request:', { name, email });
 
-  const errors = {};
-  if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
-  if (!validateEmail(email)) errors.email = 'Invalid email format';
-  if (!validatePassword(password))
-    errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
+    const errors = {};
+    if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
+    if (!validateEmail(email)) errors.email = 'Invalid email format';
+    if (!validatePassword(password))
+      errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
 
-  if (Object.keys(errors).length > 0) {
-    console.log('Validation errors:', errors);
-    return res.status(400).json({ errors });
-  }
-
-  try {
-    const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
-    if (existingUser) {
-      console.log('Email already exists:', email);
-      return res.status(400).json({ message: 'Email already exists' });
+    if (Object.keys(errors).length > 0) {
+      console.log('Validation errors:', errors);
+      return res.status(400).json({ errors });
     }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    console.log('Generated OTP:', otp);
-    const hashedPassword = await bcrypt.hash(password.trim(), 10);
-    const user = new User({
-      name: name.trim(),
-      email: email.trim().toLowerCase(),
-      password: hashedPassword,
-      otp,
-      otpExpires: Date.now() + 10 * 60 * 1000,
-      state: 'Unknown',
-      city: 'Unknown',
-      isAdmin: false, // Default to false for new users
-      subscription: null, // No default subscription
-    });
-    await user.save();
+    try {
+      const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
+      if (existingUser) {
+        console.log('Email already exists:', email);
+        return res.status(400).json({ message: 'Email already exists' });
+      }
 
-    console.log('User saved:', { userId: user._id });
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      console.log('Generated OTP:', otp);
+      const hashedPassword = await bcrypt.hash(password.trim(), 10);
+      const user = new User({
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        password: hashedPassword,
+        otp,
+        otpExpires: Date.now() + 10 * 60 * 1000,
+        state: 'Unknown',
+        city: 'Unknown',
+        isAdmin: false,
+        subscription: null,
+      });
+      await user.save();
 
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
+      console.log('User saved:', { userId: user._id });
 
-    console.log('Sending email to:', email);
-    await transporter.sendMail({
-      from: `"User Profile App" <${process.env.EMAIL_USER}>`,
-      to: email.trim().toLowerCase(),
-      subject: 'Your OTP Code',
-      text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
-    });
-    console.log('Email sent successfully');
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+      });
 
-    res.json({ message: 'OTP sent to email. Please verify.' });
-  } catch (err) {
-    console.error('Signup error:', err.message, err.stack);
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
+      console.log('Sending email to:', email);
+      await transporter.sendMail({
+        from: `"User Profile App" <${process.env.EMAIL_USER}>`,
+        to: email.trim().toLowerCase(),
+        subject: 'Your OTP Code',
+        text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
+      });
+      console.log('Email sent successfully');
+
+      res.json({ message: 'OTP sent to email. Please verify.' });
+    } catch (err) {
+      console.error('Signup error:', err.message, err.stack);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Admin Signup
+  app.post('/api/admin/signup', async (req, res) => {
+    const { name, email, password } = req.body;
+    console.log('Admin signup request:', { name, email });
+
+    const errors = {};
+    if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
+    if (!validateEmail(email)) errors.email = 'Invalid email format';
+    if (!validatePassword(password))
+      errors.password = 'Password must be 8+ characters with uppercase, lowercase, number, and special character';
+
+    if (Object.keys(errors).length > 0) {
+      console.log('Validation errors:', errors);
+      return res.status(400).json({ errors });
+    }
+
+    try {
+      const existingUser = await User.findOne({ email: email.trim().toLowerCase() });
+      if (existingUser) {
+        console.log('Email already exists:', email);
+        return res.status(400).json({ message: 'Email already exists' });
+      }
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      console.log('Generated OTP:', otp);
+      const hashedPassword = await bcrypt.hash(password.trim(), 10);
+      const user = new User({
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        password: hashedPassword,
+        otp,
+        otpExpires: Date.now() + 10 * 60 * 1000,
+        state: 'Unknown',
+        city: 'Unknown',
+        isAdmin: true,
+        subscription: null,
+      });
+      await user.save();
+
+      console.log('Admin user saved:', { userId: user._id });
+
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+      });
+
+      console.log('Sending email to:', email);
+      await transporter.sendMail({
+        from: `"Job Portal" <${process.env.EMAIL_USER}>`,
+        to: email.trim().toLowerCase(),
+        subject: 'Your OTP Code',
+        text: `Your OTP code is ${otp}. It expires in 10 minutes.`,
+      });
+      console.log('Email sent successfully');
+
+      res.json({ message: 'OTP sent to email. Please verify.' });
+    } catch (err) {
+      console.error('Admin signup error:', err.message, err.stack);
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
 
   // OTP Verification
   app.post('/api/verify-otp', async (req, res) => {
@@ -618,91 +683,330 @@ app.post('/api/signup', async (req, res) => {
 
   // Login
   app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  console.log('Login request:', { email });
+
+  try {
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) {
+      console.warn('User not found:', email);
+      return res.status(400).json({ message: 'Invalid email or password' });
+    }
+    if (!user.verified) {
+      console.warn('Email not verified:', email);
+      return res.status(400).json({ message: 'Email not verified' });
+    }
+    if (user.isAdmin) {
+      console.warn('Admin attempted to login via user endpoint:', { email });
+      return res.status(403).json({ message: 'Admin accounts must use the admin login endpoint' });
+    }
+
+    const isMatch = await bcrypt.compare(password.trim(), user.password);
+    if (!isMatch) {
+      console.warn('Invalid password for:', email);
+      return res.status(400).json({ message: 'Invalid email or password' });
+    }
+
+    const token = jwt.sign(
+      { userId: user._id, isAdmin: user.isAdmin },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    console.log('Login successful:', { userId: user._id });
+    res.json({ token, isAdmin: user.isAdmin });
+  } catch (err) {
+    console.error('Login error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+  // Admin Login
+  app.post('/api/admin/login', async (req, res) => {
     const { email, password } = req.body;
-    console.log('Login request:', { email });
+    console.log('Admin login request:', { email });
 
     try {
       const user = await User.findOne({ email: email.trim().toLowerCase() });
       if (!user) return res.status(400).json({ message: 'Invalid email or password' });
       if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
+      if (!user.isAdmin) return res.status(403).json({ message: 'Not an admin account' });
 
       const isMatch = await bcrypt.compare(password.trim(), user.password);
       if (!isMatch) return res.status(400).json({ message: 'Invalid email or password' });
 
       const token = jwt.sign(
-        { userId: user._id, isAdmin: user.isAdmin },
+        { userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' },
         process.env.JWT_SECRET,
         { expiresIn: '1h' }
       );
-      console.log('Login successful:', user._id);
-      res.json({ token, isAdmin: user.isAdmin });
+      console.log('Admin login successful:', user._id);
+      res.json({ token, userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' });
     } catch (err) {
-      console.error('Login error:', err.message);
+      console.error('Admin login error:', err.message);
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
 
-  // Profile Update with CV Upload
-  app.post('/api/profile', authenticate, upload.single('cv'), async (req, res) => {
-    const { phone, state, city, houseNoStreet } = req.body;
-    const cv = req.file;
-    console.log('Profile update request:', { userId: req.userId, phone, state, city, houseNoStreet, file: !!cv });
+  // Profile Update with CV/Logo Upload
+// Profile Update with CV/Logo Upload (POST and PUT)
+app.post('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'companyLogo' }]), handleMulterError, async (req, res) => {
+  const { name, phone, state, city, houseNoStreet, companyName, companyPhone } = req.body;
+  const { cv, companyLogo } = req.files || {};
+  console.log('Profile update request (POST):', { 
+    userId: req.userId, 
+    name, 
+    phone, 
+    state, 
+    city, 
+    houseNoStreet, 
+    companyName, 
+    companyPhone, 
+    cv: !!cv, 
+    companyLogo: !!companyLogo 
+  });
 
-    const errors = {};
-    if (!validatePhone(phone)) errors.phone = 'Phone must be a 10-digit number';
+  const errors = {};
+  if (!req.isAdmin) {
+    if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
+    if (!validatePhone(phone)) errors.phone = 'Phone must be a 10-15 digit number, optionally starting with +';
     if (!validateState(state)) errors.state = 'Invalid state';
     if (!validateCity(city)) errors.city = 'City must be at least 2 characters';
     if (!validateHouseNoStreet(houseNoStreet)) errors.houseNoStreet = 'Address must be at least 5 characters if provided';
     if (!cv) errors.cv = 'CV file is required';
+  } else {
+    if (!validateName(companyName)) errors.companyName = 'Company name must be at least 2 characters';
+    if (!validateState(state)) errors.state = 'Invalid state';
+    if (!validateCity(city)) errors.city = 'City must be at least 2 characters';
+    if (!validatePhone(companyPhone)) errors.companyPhone = 'Company phone must be a 10-15 digit number, optionally starting with +';
+  }
 
-    if (Object.keys(errors).length > 0) {
-      console.log('Validation errors:', errors);
-      return res.status(400).json({ message: 'Validation failed', errors });
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      console.warn('User not found:', req.userId);
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    try {
-      const user = await User.findById(req.userId);
-      if (!user) return res.status(404).json({ message: 'User not found' });
-
-      if (user.cvFileId) {
+    if (!req.isAdmin) {
+      if (user.cvFileId && cv) {
         try {
           await gfs.delete(new mongoose.Types.ObjectId(user.cvFileId));
           console.log('Deleted old CV:', user.cvFileId);
         } catch (err) {
-          console.error('Error deleting old CV:', err.message);
+          console.error('Error deleting old CV:', { message: err.message, stack: err.stack });
         }
       }
-
-      const uploadStream = gfs.openUploadStream(cv.originalname, {
-        contentType: cv.mimetype,
-      });
-      uploadStream.write(cv.buffer);
-      uploadStream.end();
-
-      const fileId = await new Promise((resolve, reject) => {
-        uploadStream.on('finish', () => resolve(uploadStream.id));
-        uploadStream.on('error', (err) => reject(err));
-      });
-
+      if (cv) {
+        const uploadStream = gfs.openUploadStream(cv.originalname, { contentType: cv.mimetype });
+        uploadStream.write(cv.buffer);
+        uploadStream.end();
+        user.cvFileId = await new Promise((resolve, reject) => {
+          uploadStream.on('finish', () => resolve(uploadStream.id));
+          uploadStream.on('error', (err) => reject(err));
+        });
+      }
+      user.name = name || user.name;
       user.phone = phone || user.phone;
       user.state = state || user.state;
       user.city = city || user.city;
       user.houseNoStreet = houseNoStreet || user.houseNoStreet;
-      user.cvFileId = fileId;
-
-      await user.save();
-      console.log('Profile updated:', user._id);
-      res.json({ message: 'Profile updated successfully', fileId });
-    } catch (err) {
-      console.error('Profile update error:', err.message, err.stack);
-      res.status(500).json({ message: 'Server error', error: err.message });
+    } else {
+      if (user.companyLogo && companyLogo) {
+        try {
+          await gfs.delete(new mongoose.Types.ObjectId(user.companyLogo));
+          console.log('Deleted old company logo:', user.companyLogo);
+        } catch (err) {
+          console.error('Error deleting old company logo:', { message: err.message, stack: err.stack });
+        }
+      }
+      if (companyLogo) {
+        const uploadStream = gfs.openUploadStream(companyLogo.originalname, { contentType: companyLogo.mimetype });
+        uploadStream.write(companyLogo.buffer);
+        uploadStream.end();
+        user.companyLogo = await new Promise((resolve, reject) => {
+          uploadStream.on('finish', () => resolve(uploadStream.id));
+          uploadStream.on('error', (err) => reject(err));
+        });
+      }
+      user.name = companyName || user.name;
+      user.companyName = companyName || user.companyName;
+      user.state = state || user.state;
+      user.city = city || user.city;
+      user.companyPhone = companyPhone || user.companyPhone;
     }
+
+    await user.save();
+    console.log('Profile updated:', user._id);
+    res.json({ message: 'Profile updated successfully', fileId: cv ? user.cvFileId : user.companyLogo });
+  } catch (err) {
+    console.error('Profile update error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// Add PUT route for profile updates
+app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'companyLogo' }]), handleMulterError, async (req, res) => {
+  const { name, phone, state, city, houseNoStreet, companyName, companyPhone } = req.body;
+  const { cv, companyLogo } = req.files || {};
+  console.log('Profile update request (PUT):', {
+    userId: req.userId,
+    name,
+    phone,
+    state,
+    city,
+    houseNoStreet,
+    companyName,
+    companyPhone,
+    cv: !!cv,
+    companyLogo: companyLogo
+      ? { originalname: companyLogo[0]?.originalname, mimetype: companyLogo[0]?.mimetype, size: companyLogo[0]?.size, hasBuffer: !!companyLogo[0]?.buffer }
+      : null,
   });
+
+  if (!gfs) {
+    console.error('GridFS not initialized');
+    return res.status(500).json({ message: 'Server error: GridFS not initialized' });
+  }
+
+  const errors = {};
+  if (!req.isAdmin) {
+    if (!validateName(name)) errors.name = 'Name must be at least 2 characters';
+    if (!validatePhone(phone)) errors.phone = 'Phone must be a 10-15 digit number, optionally starting with +';
+    if (!validateState(state)) errors.state = 'Invalid state';
+    if (!validateCity(city)) errors.city = 'City must be at least 2 characters';
+    if (!validateHouseNoStreet(houseNoStreet)) errors.houseNoStreet = 'Address must be at least 5 characters if provided';
+  } else {
+    if (!validateName(companyName)) errors.companyName = 'Company name must be at least 2 characters';
+    if (!validateState(state)) errors.state = 'Invalid state';
+    if (!validateCity(city)) errors.city = 'City must be at least 2 characters';
+    if (!validatePhone(companyPhone)) errors.companyPhone = 'Company phone must be a 10-15 digit number, optionally starting with +';
+  }
+
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      console.warn('User not found:', req.userId);
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (!req.isAdmin) {
+      if (user.cvFileId && cv) {
+        try {
+          await gfs.delete(new mongoose.Types.ObjectId(user.cvFileId));
+          console.log('Deleted old CV:', user.cvFileId);
+        } catch (err) {
+          console.error('Error deleting old CV:', { message: err.message, stack: err.stack });
+        }
+      }
+      if (cv && cv[0]) {
+        if (!cv[0].buffer || cv[0].buffer.length === 0) {
+          console.error('Invalid CV file: No buffer or empty');
+          return res.status(400).json({ message: 'Invalid CV file: No data or empty' });
+        }
+        const uploadStream = gfs.openUploadStream(cv[0].originalname, { contentType: cv[0].mimetype });
+        uploadStream.write(cv[0].buffer);
+        uploadStream.end();
+        user.cvFileId = await new Promise((resolve, reject) => {
+          uploadStream.on('finish', () => resolve(uploadStream.id));
+          uploadStream.on('error', (err) => reject(err));
+        });
+      }
+      user.name = name || user.name;
+      user.phone = phone || user.phone;
+      user.state = state || user.state;
+      user.city = city || user.city;
+      user.houseNoStreet = houseNoStreet || user.houseNoStreet;
+    } else {
+      if (user.companyLogo && companyLogo && companyLogo[0]) {
+        try {
+          await gfs.delete(new mongoose.Types.ObjectId(user.companyLogo));
+          console.log('Deleted old company logo:', user.companyLogo);
+        } catch (err) {
+          console.error('Error deleting old company logo:', { message: err.message, stack: err.stack });
+        }
+      }
+      if (companyLogo && companyLogo[0]) {
+        if (!companyLogo[0].buffer || companyLogo[0].buffer.length === 0) {
+          console.error('Invalid company logo file: No buffer or empty', {
+            originalname: companyLogo[0].originalname,
+            mimetype: companyLogo[0].mimetype,
+            size: companyLogo[0].size,
+          });
+          return res.status(400).json({ message: 'Invalid company logo file: No data or empty' });
+        }
+        const uploadStream = gfs.openUploadStream(companyLogo[0].originalname, {
+          contentType: companyLogo[0].mimetype,
+        });
+        uploadStream.write(companyLogo[0].buffer);
+        uploadStream.end();
+        user.companyLogo = await new Promise((resolve, reject) => {
+          uploadStream.on('finish', () => resolve(uploadStream.id));
+          uploadStream.on('error', (err) => reject(err));
+        });
+        console.log('Company logo uploaded to GridFS:', user.companyLogo);
+      }
+      user.name = companyName || user.name;
+      user.companyName = companyName || user.companyName;
+      user.state = state || user.state;
+      user.city = city || user.city;
+      user.companyPhone = companyPhone || user.companyPhone;
+    }
+
+    await user.save();
+    console.log('Profile updated:', user._id);
+    res.json({ message: 'Profile updated successfully', fileId: cv ? user.cvFileId : user.companyLogo });
+  } catch (err) {
+    console.error('Profile update error:', {
+      message: err.message,
+      stack: err.stack,
+      fileDetails: companyLogo && companyLogo[0]
+        ? { originalname: companyLogo[0].originalname, mimetype: companyLogo[0].mimetype, size: companyLogo[0].size }
+        : null,
+    });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+app.get('/api/company-logo/:fileId', async (req, res) => {
+  try {
+    const fileId = req.params.fileId;
+    if (!mongoose.Types.ObjectId.isValid(fileId)) {
+      console.warn('Invalid fileId format:', fileId);
+      return res.status(400).json({ message: 'Invalid file ID format' });
+    }
+    const file = await gfs.find({ _id: new mongoose.Types.ObjectId(fileId) }).toArray();
+    if (!file || file.length === 0) {
+      console.warn('File not found in GridFS:', fileId);
+      return res.status(404).json({ message: 'File not found' });
+    }
+    res.set('Content-Type', file[0].contentType);
+    const downloadStream = gfs.openDownloadStream(new mongoose.Types.ObjectId(fileId));
+    downloadStream.pipe(res);
+    downloadStream.on('error', (err) => {
+      console.error('Download stream error:', { message: err.message, stack: err.stack });
+      res.status(500).json({ message: 'Error serving file' });
+    });
+  } catch (err) {
+    console.error('Logo fetch error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 
   // Get Profile
   app.get('/api/profile', authenticate, async (req, res) => {
     try {
-      const user = await User.findById(req.userId).select('name email phone state city houseNoStreet cvFileId');
+      const user = await User.findById(req.userId).select(
+        'name email phone state city houseNoStreet cvFileId companyName companyPhone companyLogo isAdmin'
+      );
       if (!user) return res.status(404).json({ message: 'User not found' });
       console.log('Profile fetched:', user._id);
       res.json(user);
@@ -755,14 +1059,29 @@ app.post('/api/signup', async (req, res) => {
   });
 
   // Admin: Create Job Post
-  app.post('/api/admin/job-posts', authenticate, async (req, res) => {
-    if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-    const { title, description, location } = req.body;
-    console.log('Create job post request:', { title, location });
+app.post('/api/admin/job-posts', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  const { title, description, location } = req.body;
+  console.log('Create job post request:', { userId: req.userId, title, location });
 
-    const errors = {};
-    if (!validateJobPost(title, description, location)) {
-      errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
+  const errors = {};
+  if (!validateJobPost(title, description, location)) {
+    errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      console.warn('User not found:', req.userId);
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (!user.companyName || !user.companyLogo) {
+      console.warn('Incomplete admin profile for job creation:', {
+        userId: req.userId,
+        companyName: !!user.companyName,
+        companyLogo: !!user.companyLogo,
+      });
+      return res.status(400).json({ message: 'Please complete your company profile (name and logo) before creating a job post' });
     }
 
     if (Object.keys(errors).length > 0) {
@@ -770,22 +1089,22 @@ app.post('/api/signup', async (req, res) => {
       return res.status(400).json({ message: 'Validation failed', errors });
     }
 
-    try {
-      const jobPost = new JobPost({
-        title: title.trim(),
-        description: description.trim(),
-        location: location.trim(),
-        postedBy: req.userId,
-      });
-      await jobPost.save();
-      await jobPost.populate('postedBy', 'name email');
-      console.log('Job post created:', jobPost._id);
-      res.json({ message: 'Job post created successfully', jobPost });
-    } catch (err) {
-      console.error('Create job post error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
-    }
-  });
+    const jobPost = new JobPost({
+      title: title.trim(),
+      description: description.trim(),
+      location: location.trim(),
+      postedBy: req.userId,
+      isActive: true,
+    });
+    await jobPost.save();
+    await jobPost.populate('postedBy', 'companyName companyLogo');
+    console.log('Job post created:', jobPost._id);
+    res.json({ message: 'Job post created successfully', jobPost });
+  } catch (err) {
+    console.error('Create job post error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 
   // Admin: Get All Job Posts
   app.get('/api/admin/job-posts', authenticate, async (req, res) => {
@@ -843,73 +1162,94 @@ app.post('/api/signup', async (req, res) => {
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
-app.post('/api/resend-otp', async (req, res) => {
-  const { email } = req.body;
-  console.log('Resend OTP request:', { email });
 
-  // Validate email
-  if (!validateEmail(email)) {
-    console.warn('Invalid email format:', email);
-    return res.status(400).json({ message: 'Invalid email format' });
-  }
+  // Resend OTP
+  app.post('/api/resend-otp', async (req, res) => {
+    const { email } = req.body;
+    console.log('Resend OTP request:', { email });
 
-  try {
-    const user = await User.findOne({ email: email.trim().toLowerCase() });
-    if (!user) {
-      console.warn('User not found:', email);
-      return res.status(400).json({ message: 'User not found' });
-    }
-    if (user.verified) {
-      console.warn('User already verified:', email);
-      return res.status(400).json({ message: 'User already verified' });
+    if (!validateEmail(email)) {
+      console.warn('Invalid email format:', email);
+      return res.status(400).json({ message: 'Invalid email format' });
     }
 
-    // Generate new OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    console.log('Generated new OTP:', otp);
-    user.otp = otp;
-    user.otpExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
-    await user.save();
-
-    // Send OTP email
-    const transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
-
-    console.log('Sending email to:', email);
-    await transporter.sendMail({
-      from: `"User Profile App" <${process.env.EMAIL_USER}>`,
-      to: email.trim().toLowerCase(),
-      subject: 'Your OTP Code',
-      text: `Your new OTP code is ${otp}. It expires in 10 minutes.`,
-    });
-    console.log('Email sent successfully');
-
-    res.json({ message: 'New OTP sent to email. Please verify.' });
-  } catch (err) {
-    console.error('Resend OTP error:', {
-      message: err.message,
-      stack: err.stack,
-    });
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
-  // User: Get All Job Posts
-  app.get('/api/jobs', async (req, res) => {
     try {
-      const jobPosts = await JobPost.find({ isActive: true }).select('title description location createdAt');
-      console.log('Fetched job posts for users:', jobPosts.length);
-      res.json(jobPosts);
+      const user = await User.findOne({ email: email.trim().toLowerCase() });
+      if (!user) {
+        console.warn('User not found:', email);
+        return res.status(400).json({ message: 'User not found' });
+      }
+      if (user.verified) {
+        console.warn('User already verified:', email);
+        return res.status(400).json({ message: 'User already verified' });
+      }
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      console.log('Generated new OTP:', otp);
+      user.otp = otp;
+      user.otpExpires = Date.now() + 10 * 60 * 1000;
+      await user.save();
+
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+      });
+
+      console.log('Sending email to:', email);
+      await transporter.sendMail({
+        from: `"User Profile App" <${process.env.EMAIL_USER}>`,
+        to: email.trim().toLowerCase(),
+        subject: 'Your OTP Code',
+        text: `Your new OTP code is ${otp}. It expires in 10 minutes.`,
+      });
+      console.log('Email sent successfully');
+
+      res.json({ message: 'New OTP sent to email. Please verify.' });
     } catch (err) {
-      console.error('Fetch jobs error:', err.message);
+      console.error('Resend OTP error:', {
+        message: err.message,
+        stack: err.stack,
+      });
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
 
+  // User: Get All Job Posts
+app.get('/api/jobs', async (req, res) => {
+  try {
+const apiUrl = process.env.API_URL || `http://localhost:${process.env.PORT || 5000}`;    if (!process.env.API_URL) {
+      console.warn('API_URL is not defined in environment variables, using fallback:', apiUrl);
+    }
+    const jobPosts = await JobPost.find({ isActive: true })
+      .select('title description location createdAt postedBy')
+      .populate({
+        path: 'postedBy',
+        select: 'companyName companyLogo',
+      })
+      .lean();
+    const jobsWithCompany = jobPosts.map(job => ({
+      _id: job._id,
+      title: job.title,
+      description: job.description,
+      location: job.location,
+      createdAt: job.createdAt,
+      company: {
+        name: job.postedBy?.companyName || 'Unknown Company',
+        logo: job.postedBy?.companyLogo && mongoose.Types.ObjectId.isValid(job.postedBy.companyLogo)
+          ? `${apiUrl}/api/company-logo/${job.postedBy.companyLogo}`
+          : null,
+      },
+    }));
+    console.log('Fetched job posts for users:', jobsWithCompany.length);
+    res.json(jobsWithCompany);
+  } catch (err) {
+    console.error('Fetch jobs error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
   // User: Get Applied Job Posts
   app.get('/api/user/applications', authenticate, async (req, res) => {
     try {
