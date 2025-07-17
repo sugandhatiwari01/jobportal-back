@@ -10,6 +10,7 @@ const { GridFSBucket } = require('mongodb');
 const paypal = require('paypal-rest-sdk');
 const QRCode = require('qrcode');
 const path = require('path');
+const crypto = require('crypto');
 
 const app = express();
 
@@ -158,14 +159,16 @@ const userSchema = new mongoose.Schema({
   city: { type: String, required: true, default: 'Unknown' },
   houseNoStreet: { type: String },
   cvFileId: { type: mongoose.Types.ObjectId, ref: 'cvs.files' },
-  companyName: { type: String }, // Admin-specific
-  companyPhone: { type: String }, // Admin-specific
-  companyLogo: { type: mongoose.Types.ObjectId, ref: 'cvs.files' }, // Admin-specific, stored in GridFS
+  companyName: { type: String },
+  companyPhone: { type: String },
+  companyLogo: { type: mongoose.Types.ObjectId, ref: 'cvs.files' },
   otp: { type: String },
   otpExpires: { type: Date },
   verified: { type: Boolean, default: false },
   isAdmin: { type: Boolean, default: false },
   subscription: { type: mongoose.Schema.Types.ObjectId, ref: 'Subscription' },
+  resetPasswordToken: { type: String }, // New field for reset token
+  resetPasswordExpires: { type: Date }, // New field for token expiration
 });
 const User = mongoose.model('User', userSchema);
 
@@ -387,6 +390,7 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
     res.status(500).json({ message: 'Server error during subscription activation', error: err.message });
   }
 });
+
 
   // Verify Payment and Update Subscription
   app.post('/api/subscription/verify', authenticate, async (req, res) => {
@@ -721,30 +725,51 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
 
   // Admin Login
   app.post('/api/admin/login', async (req, res) => {
-    const { email, password } = req.body;
-    console.log('Admin login request:', { email });
-
-    try {
-      const user = await User.findOne({ email: email.trim().toLowerCase() });
-      if (!user) return res.status(400).json({ message: 'Invalid email or password' });
-      if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
-      if (!user.isAdmin) return res.status(403).json({ message: 'Not an admin account' });
-
-      const isMatch = await bcrypt.compare(password.trim(), user.password);
-      if (!isMatch) return res.status(400).json({ message: 'Invalid email or password' });
-
-      const token = jwt.sign(
-        { userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' },
-        process.env.JWT_SECRET,
-        { expiresIn: '1h' }
-      );
-      console.log('Admin login successful:', user._id);
-      res.json({ token, userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' });
-    } catch (err) {
-      console.error('Admin login error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
+  const { email, password } = req.body;
+  console.log('Admin login request:', { email });
+  try {
+    if (!email || !password) {
+      console.warn('Missing email or password:', { email, hasPassword: !!password });
+      return res.status(400).json({ message: 'Email and password are required' });
     }
-  });
+    if (!mongoose.connection.readyState) {
+      console.error('MongoDB not connected');
+      return res.status(500).json({ message: 'Database connection error' });
+    }
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET not configured');
+      return res.status(500).json({ message: 'Server configuration error: Missing JWT_SECRET' });
+    }
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) {
+      console.warn('User not found:', email);
+      return res.status(400).json({ message: 'Invalid email or password' });
+    }
+    if (!user.verified) {
+      console.warn('Email not verified:', email);
+      return res.status(400).json({ message: 'Email not verified' });
+    }
+    if (!user.isAdmin) {
+      console.warn('Not an admin account:', email);
+      return res.status(403).json({ message: 'Not an admin account' });
+    }
+    const isMatch = await bcrypt.compare(password.trim(), user.password);
+    if (!isMatch) {
+      console.warn('Invalid password for:', email);
+      return res.status(400).json({ message: 'Invalid email or password' });
+    }
+    const token = jwt.sign(
+      { userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' },
+      process.env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    console.log('Admin login successful:', user._id);
+    res.json({ token, userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' });
+  } catch (err) {
+    console.error('Admin login error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error during login', error: err.message || 'Unknown error' });
+  }
+});
 
   // Profile Update with CV/Logo Upload
 // Profile Update with CV/Logo Upload (POST and PUT)
@@ -1215,11 +1240,213 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       res.status(500).json({ message: 'Server error', error: err.message });
     }
   });
+app.post('/api/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    console.log('Forgot password request (user):', { email });
 
+    if (!validateEmail(email)) {
+      console.warn('Invalid email format:', email);
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+
+    try {
+      const user = await User.findOne({ email: email.trim().toLowerCase() });
+      if (!user) {
+        console.warn('User not found:', email);
+        return res.status(400).json({ message: 'User not found' });
+      }
+      if (user.isAdmin) {
+        console.warn('Admin account attempted via user endpoint:', email);
+        return res.status(403).json({ message: 'Admin accounts must use the admin forgot password endpoint' });
+      }
+
+      // Generate a reset token
+      const resetToken = crypto.randomBytes(20).toString('hex');
+      user.resetPasswordToken = resetToken;
+      user.resetPasswordExpires = Date.now() + 60 * 60 * 1000; // Token expires in 1 hour
+      await user.save();
+
+      console.log('Reset token generated:', { userId: user._id, resetToken });
+
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          user: process.env.EMAIL_USER,
+          pass: process.env.EMAIL_PASS,
+        },
+      });
+
+      const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
+      console.log('Sending reset email to:', email, 'with URL:', resetUrl);
+
+      await transporter.sendMail({
+        from: `"Job Portal" <${process.env.EMAIL_USER}>`,
+        to: email.trim().toLowerCase(),
+        subject: 'Password Reset Request',
+        text: `You are receiving this email because you (or someone else) requested a password reset for your account.\n\n` +
+              `Please click the following link to reset your password:\n${resetUrl}\n\n` +
+              `This link will expire in 1 hour. If you did not request a password reset, please ignore this email.\n`,
+      });
+
+      console.log('Reset email sent successfully');
+      res.json({ message: 'Password reset email sent. Please check your inbox.' });
+    } catch (err) {
+      console.error('Forgot password error (user):', {
+        message: err.message,
+        stack: err.stack,
+      });
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  // Reset Password Endpoint for Regular Users
+  app.post('/api/reset-password', async (req, res) => {
+    const { token, newPassword } = req.body;
+    console.log('Reset password request (user):', { token });
+
+    if (!validatePassword(newPassword)) {
+      console.warn('Invalid password format');
+      return res.status(400).json({
+        message: 'Password must be 8+ characters with uppercase, lowercase, number, and special character',
+      });
+    }
+
+    try {
+      const user = await User.findOne({
+        resetPasswordToken: token,
+        resetPasswordExpires: { $gt: Date.now() },
+      });
+
+      if (!user) {
+        console.warn('Invalid or expired reset token:', token);
+        return res.status(400).json({ message: 'Invalid or expired reset token' });
+      }
+      if (user.isAdmin) {
+        console.warn('Admin account attempted via user endpoint:', user.email);
+        return res.status(403).json({ message: 'Admin accounts must use the admin reset password endpoint' });
+      }
+
+      user.password = await bcrypt.hash(newPassword.trim(), 10);
+      user.resetPasswordToken = null;
+      user.resetPasswordExpires = null;
+      await user.save();
+
+      console.log('Password reset successful (user):', user._id);
+      res.json({ message: 'Password reset successfully' });
+    } catch (err) {
+      console.error('Reset password error (user):', {
+        message: err.message,
+        stack: err.stack,
+      });
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+
+  app.post('/api/admin/reset-password', async (req, res) => {
+    const { token, newPassword } = req.body;
+    console.log('Reset password request (admin):', { token });
+
+    if (!validatePassword(newPassword)) {
+      console.warn('Invalid password format');
+      return res.status(400).json({
+        message: 'Password must be 8+ characters with uppercase, lowercase, number, and special character',
+      });
+    }
+
+    try {
+      const user = await User.findOne({
+        resetPasswordToken: token,
+        resetPasswordExpires: { $gt: Date.now() },
+      });
+
+      if (!user) {
+        console.warn('Invalid or expired reset token:', token);
+        return res.status(400).json({ message: 'Invalid or expired reset token' });
+      }
+      if (!user.isAdmin) {
+        console.warn('Non-admin account attempted via admin endpoint:', user.email);
+        return res.status(403).json({ message: 'Not an admin account' });
+      }
+
+      user.password = await bcrypt.hash(newPassword.trim(), 10);
+      user.resetPasswordToken = null;
+      user.resetPasswordExpires = null;
+      await user.save();
+
+      console.log('Password reset successful (admin):', user._id);
+      res.json({ message: 'Password reset successfully' });
+    } catch (err) {
+      console.error('Reset password error (admin):', {
+        message: err.message,
+        stack: err.stack,
+      });
+      res.status(500).json({ message: 'Server error', error: err.message });
+    }
+  });
+  // Admin Forgot Password Endpoint
+app.post('/api/admin/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  console.log('Forgot password request (admin):', { email });
+
+  if (!validateEmail(email)) {
+    console.warn('Invalid email format:', email);
+    return res.status(400).json({ message: 'Invalid email format' });
+  }
+
+  try {
+    const user = await User.findOne({ email: email.trim().toLowerCase() });
+    if (!user) {
+      console.warn('User not found:', email);
+      return res.status(400).json({ message: 'User not found' });
+    }
+    if (!user.isAdmin) {
+      console.warn('Non-admin account attempted via admin endpoint:', email);
+      return res.status(403).json({ message: 'Not an admin account' });
+    }
+
+    // Generate a reset token
+    const resetToken = crypto.randomBytes(20).toString('hex');
+    user.resetPasswordToken = resetToken;
+    user.resetPasswordExpires = Date.now() + 60 * 60 * 1000; // Token expires in 1 hour
+    await user.save();
+
+    console.log('Reset token generated:', { userId: user._id, resetToken });
+
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+    });
+
+    const resetUrl = `${process.env.FRONTEND_URL}/admin/reset-password/${resetToken}`;
+    console.log('Sending reset email to:', email, 'with URL:', resetUrl);
+
+    await transporter.sendMail({
+      from: `"Job Portal" <${process.env.EMAIL_USER}>`,
+      to: email.trim().toLowerCase(),
+      subject: 'Admin Password Reset Request',
+      text: `You are receiving this email because you (or someone else) requested a password reset for your admin account.\n\n` +
+            `Please click the following link to reset your password:\n${resetUrl}\n\n` +
+            `This link will expire in 1 hour. If you did not request a password reset, please ignore this email.\n`,
+    });
+
+    console.log('Reset email sent successfully');
+    res.json({ message: 'Password reset email sent. Please check your inbox.' });
+  } catch (err) {
+    console.error('Forgot password error (admin):', {
+      message: err.message,
+      stack: err.stack,
+    });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
   // User: Get All Job Posts
 app.get('/api/jobs', async (req, res) => {
   try {
-const apiUrl = process.env.API_URL || `http://localhost:${process.env.PORT || 5000}`;    if (!process.env.API_URL) {
+const apiUrl = process.env.API_URL || 'https://jobportal-back-1jtg.onrender.com';
+ if (!process.env.API_URL) {
       console.warn('API_URL is not defined in environment variables, using fallback:', apiUrl);
     }
     const jobPosts = await JobPost.find({ isActive: true })
