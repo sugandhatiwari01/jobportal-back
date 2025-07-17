@@ -1220,7 +1220,7 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   // User: Get All Job Posts
 app.get('/api/jobs', async (req, res) => {
   try {
-const apiUrl = process.env.API_URL || `http://localhost:${process.env.PORT || 5000}`;    if (!process.env.API_URL) {
+const apiUrl = process.env.API_URL || 'https://jobportal-back-1jtg.onrender.com';
       console.warn('API_URL is not defined in environment variables, using fallback:', apiUrl);
     }
     const jobPosts = await JobPost.find({ isActive: true })
