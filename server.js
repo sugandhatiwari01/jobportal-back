@@ -1087,12 +1087,10 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   const { title, description, location } = req.body;
   console.log('Create job post request:', { userId: req.userId, title, location });
-
   const errors = {};
   if (!validateJobPost(title, description, location)) {
     errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
   }
-
   try {
     const user = await User.findById(req.userId);
     if (!user) {
@@ -1107,12 +1105,10 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       });
       return res.status(400).json({ message: 'Please complete your company profile (name and logo) before creating a job post' });
     }
-
     if (Object.keys(errors).length > 0) {
       console.log('Validation errors:', errors);
       return res.status(400).json({ message: 'Validation failed', errors });
     }
-
     const jobPost = new JobPost({
       title: title.trim(),
       description: description.trim(),
@@ -1121,7 +1117,8 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       isActive: true,
     });
     await jobPost.save();
-    await jobPost.populate('postedBy', 'companyName companyLogo');
+    // Populate with 'name' to match GET endpoint
+    await jobPost.populate('postedBy', 'name email companyName companyLogo');
     console.log('Job post created:', jobPost._id);
     res.json({ message: 'Job post created successfully', jobPost });
   } catch (err) {
