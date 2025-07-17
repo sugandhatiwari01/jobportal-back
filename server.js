@@ -713,7 +713,7 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
     const token = jwt.sign(
       { userId: user._id, isAdmin: user.isAdmin },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     console.log('Login successful:', { userId: user._id });
     res.json({ token, isAdmin: user.isAdmin });
@@ -761,7 +761,7 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
     const token = jwt.sign(
       { userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' },
       process.env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '24h' }
     );
     console.log('Admin login successful:', user._id);
     res.json({ token, userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' });
