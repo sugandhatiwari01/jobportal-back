@@ -1549,6 +1549,7 @@ app.post('/api/admin/forgot-password', async (req, res) => {
 app.get('/api/jobs', async (req, res) => {
   try {
     const apiUrl = process.env.API_URL || 'https://jobportal-back-1jtg.onrender.com';
+
     if (!process.env.API_URL) {
       console.warn('API_URL is not defined in environment variables, using fallback:', apiUrl);
     }
