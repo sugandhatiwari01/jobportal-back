@@ -169,6 +169,7 @@ const userSchema = new mongoose.Schema({
   subscription: { type: mongoose.Schema.Types.ObjectId, ref: 'Subscription' },
   resetPasswordToken: { type: String }, // New field for reset token
   resetPasswordExpires: { type: Date }, // New field for token expiration
+skills: [{ type: String }] // Add this line
 });
 const User = mongoose.model('User', userSchema);
 
@@ -773,8 +774,9 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
 
   // Profile Update with CV/Logo Upload
 // Profile Update with CV/Logo Upload (POST and PUT)
+// Profile Update with CV/Logo Upload (POST)
 app.post('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'companyLogo' }]), handleMulterError, async (req, res) => {
-  const { name, phone, state, city, houseNoStreet, companyName, companyPhone } = req.body;
+  const { name, phone, state, city, houseNoStreet, companyName, companyPhone, skills } = req.body;
   const { cv, companyLogo } = req.files || {};
   console.log('Profile update request (POST):', { 
     userId: req.userId, 
@@ -785,6 +787,7 @@ app.post('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'c
     houseNoStreet, 
     companyName, 
     companyPhone, 
+    skills, // Log skills
     cv: !!cv, 
     companyLogo: !!companyLogo 
   });
@@ -797,6 +800,16 @@ app.post('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'c
     if (!validateCity(city)) errors.city = 'City must be at least 2 characters';
     if (!validateHouseNoStreet(houseNoStreet)) errors.houseNoStreet = 'Address must be at least 5 characters if provided';
     if (!cv) errors.cv = 'CV file is required';
+    if (skills) {
+      try {
+        const parsedSkills = JSON.parse(skills); // Assuming skills is sent as a JSON string
+        if (!Array.isArray(parsedSkills) || parsedSkills.some(s => !validateName(s))) {
+          errors.skills = 'Skills must be an array of strings, each at least 2 characters';
+        }
+      } catch (err) {
+        errors.skills = 'Invalid skills format; must be a JSON array of strings';
+      }
+    }
   } else {
     if (!validateName(companyName)) errors.companyName = 'Company name must be at least 2 characters';
     if (!validateState(state)) errors.state = 'Invalid state';
@@ -839,6 +852,10 @@ app.post('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'c
       user.state = state || user.state;
       user.city = city || user.city;
       user.houseNoStreet = houseNoStreet || user.houseNoStreet;
+      if (skills) {
+        user.skills = JSON.parse(skills); // Update skills
+        console.log('Updated user skills:', user.skills);
+      }
     } else {
       if (user.companyLogo && companyLogo) {
         try {
@@ -872,10 +889,9 @@ app.post('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'c
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
-
 // Add PUT route for profile updates
 app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'companyLogo' }]), handleMulterError, async (req, res) => {
-  const { name, phone, state, city, houseNoStreet, companyName, companyPhone } = req.body;
+  const { name, phone, state, city, houseNoStreet, companyName, companyPhone, skills } = req.body;
   const { cv, companyLogo } = req.files || {};
   console.log('Profile update request (PUT):', {
     userId: req.userId,
@@ -886,6 +902,7 @@ app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'co
     houseNoStreet,
     companyName,
     companyPhone,
+    skills, // Log skills
     cv: !!cv,
     companyLogo: companyLogo
       ? { originalname: companyLogo[0]?.originalname, mimetype: companyLogo[0]?.mimetype, size: companyLogo[0]?.size, hasBuffer: !!companyLogo[0]?.buffer }
@@ -904,6 +921,16 @@ app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'co
     if (!validateState(state)) errors.state = 'Invalid state';
     if (!validateCity(city)) errors.city = 'City must be at least 2 characters';
     if (!validateHouseNoStreet(houseNoStreet)) errors.houseNoStreet = 'Address must be at least 5 characters if provided';
+    if (skills) {
+      try {
+        const parsedSkills = JSON.parse(skills); // Assuming skills is sent as a JSON string
+        if (!Array.isArray(parsedSkills) || parsedSkills.some(s => !validateName(s))) {
+          errors.skills = 'Skills must be an array of strings, each at least 2 characters';
+        }
+      } catch (err) {
+        errors.skills = 'Invalid skills format; must be a JSON array of strings';
+      }
+    }
   } else {
     if (!validateName(companyName)) errors.companyName = 'Company name must be at least 2 characters';
     if (!validateState(state)) errors.state = 'Invalid state';
@@ -924,7 +951,7 @@ app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'co
     }
 
     if (!req.isAdmin) {
-      if (user.cvFileId && cv) {
+      if (user.cvFileId && cv && cv[0]) {
         try {
           await gfs.delete(new mongoose.Types.ObjectId(user.cvFileId));
           console.log('Deleted old CV:', user.cvFileId);
@@ -950,6 +977,10 @@ app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'co
       user.state = state || user.state;
       user.city = city || user.city;
       user.houseNoStreet = houseNoStreet || user.houseNoStreet;
+      if (skills) {
+        user.skills = JSON.parse(skills); // Update skills
+        console.log('Updated user skills:', user.skills);
+      }
     } else {
       if (user.companyLogo && companyLogo && companyLogo[0]) {
         try {
@@ -1000,6 +1031,22 @@ app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'co
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
+
+// Get Profile
+app.get('/api/profile', authenticate, async (req, res) => {
+  try {
+    const user = await User.findById(req.userId).select(
+      'name email phone state city houseNoStreet cvFileId companyName companyPhone companyLogo isAdmin skills' // Include skills
+    );
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    console.log('Profile fetched:', user._id);
+    res.json(user);
+  } catch (err) {
+    console.error('Get profile error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
 app.get('/api/company-logo/:fileId', async (req, res) => {
   try {
     const fileId = req.params.fileId;
@@ -1128,18 +1175,26 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
 });
 
   // Admin: Get All Job Posts
-  app.get('/api/admin/job-posts', authenticate, async (req, res) => {
-    if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-    try {
-      const jobPosts = await JobPost.find({ postedBy: req.userId })
-        .populate('postedBy', 'name email');
-      console.log('Fetched job posts, Count:', jobPosts.length);
-      res.json(jobPosts);
-    } catch (err) {
-      console.error('Fetch job posts error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
-    }
-  });
+app.get('/api/admin/job-posts', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  try {
+    const jobPosts = await JobPost.find({ postedBy: req.userId })
+      .populate('postedBy', 'name email companyName companyLogo')
+      .lean();
+    jobPosts.forEach((post) => {
+      if (!post.postedBy) {
+        console.warn(`Job post ${post._id} has no postedBy reference`);
+      } else if (!post.postedBy.companyName) {
+        console.warn(`Job post ${post._id} has postedBy user ${post.postedBy._id} with missing companyName`);
+      }
+    });
+    console.log('Fetched job posts, Count:', jobPosts.length);
+    res.json(jobPosts);
+  } catch (err) {
+    console.error('Fetch job posts error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 
   // Admin: Get Single Job Post
   app.get('/api/admin/job-posts/:id', authenticate, async (req, res) => {
@@ -1162,27 +1217,57 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   });
 
   // Admin: Get Applications for a Job Post
-  app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) => {
-    if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-    try {
-      const jobPostId = req.params.id;
-      if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
-        console.warn('Invalid jobPostId format:', jobPostId);
-        return res.status(400).json({ message: 'Invalid job post ID format' });
-      }
-      const jobPost = await JobPost.findOne({ _id: jobPostId, postedBy: req.userId });
-      if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized to view its applications' });
+// Admin: Get Applications for a Job Post
 
-      const applications = await Application.find({ jobPostId })
-        .populate('userId', 'name email phone state city houseNoStreet cvFileId')
-        .populate('jobPostId', 'title');
-      console.log('Fetched applications for job post:', jobPostId, 'Count:', applications.length);
-      res.json(applications);
-    } catch (err) {
-      console.error('Fetch applications error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
+app.get('/api/admin/job-posts/:id/applications', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  try {
+    const jobPostId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+      console.warn('Invalid jobPostId format:', jobPostId);
+      return res.status(400).json({ message: 'Invalid job post ID format' });
     }
-  });
+    const jobPost = await JobPost.findOne({ _id: jobPostId, postedBy: req.userId });
+    if (!jobPost) return res.status(404).json({ message: 'Job post not found or you are not authorized to view its applications' });
+
+    const applications = await Application.find({ jobPostId })
+      .populate({
+        path: 'userId',
+        select: 'name email phone state city houseNoStreet cvFileId skills',
+        model: 'User' // Explicitly specify the model
+      })
+      .populate('jobPostId', 'title')
+      .lean();
+
+    // Debug logging to verify populated data
+    applications.forEach(app => {
+      console.log('Application data:', {
+        applicationId: app._id,
+        userId: app.userId?._id,
+        userEmail: app.userId?.email,
+        skills: app.userId?.skills,
+      });
+    });
+
+    // Transform response to ensure skills is always an array
+    const transformedApplications = applications.map(app => ({
+      ...app,
+      userId: app.userId ? {
+        ...app.userId,
+        skills: Array.isArray(app.userId.skills) ? app.userId.skills : []
+      } : null
+    }));
+
+    console.log('Fetched applications for job post:', jobPostId, 'Count:', transformedApplications.length);
+    res.json(transformedApplications);
+  } catch (err) {
+    console.error('Fetch applications error:', {
+      message: err.message,
+      stack: err.stack
+    });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 
   // Resend OTP
   app.post('/api/resend-otp', async (req, res) => {
