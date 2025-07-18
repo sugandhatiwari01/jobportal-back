@@ -174,15 +174,18 @@ skills: [{ type: String }] // Add this line
 const User = mongoose.model('User', userSchema);
 
 // Job Post Schema
+
 const jobPostSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
   location: { type: String, required: true },
   postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  createdAt: { type: Date, default: Date.now },
   isActive: { type: Boolean, default: true },
+  createdAt: { type: Date, default: Date.now },
+  skills: [{ type: String }], // Added skills field
 });
 const JobPost = mongoose.model('JobPost', jobPostSchema);
+
 
 // Application Schema
 const applicationSchema = new mongoose.Schema({
@@ -1132,12 +1135,28 @@ app.get('/api/company-logo/:fileId', async (req, res) => {
   // Admin: Create Job Post
 app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-  const { title, description, location } = req.body;
-  console.log('Create job post request:', { userId: req.userId, title, location });
+  const { title, description, location, skills } = req.body;
+  console.log('Create job post request:', { userId: req.userId, title, location, skills });
+
   const errors = {};
   if (!validateJobPost(title, description, location)) {
     errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
   }
+  if (skills) {
+    try {
+      const parsedSkills = JSON.parse(skills);
+      if (!Array.isArray(parsedSkills) || parsedSkills.some(s => !s || s.trim().length < 2)) {
+        errors.skills = 'Skills must be an array of non-empty strings, each at least 2 characters';
+      }
+    } catch (err) {
+      errors.skills = 'Invalid skills format; must be a JSON array of strings';
+    }
+  }
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
+
   try {
     const user = await User.findById(req.userId);
     if (!user) {
@@ -1152,21 +1171,18 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       });
       return res.status(400).json({ message: 'Please complete your company profile (name and logo) before creating a job post' });
     }
-    if (Object.keys(errors).length > 0) {
-      console.log('Validation errors:', errors);
-      return res.status(400).json({ message: 'Validation failed', errors });
-    }
+
     const jobPost = new JobPost({
       title: title.trim(),
       description: description.trim(),
       location: location.trim(),
       postedBy: req.userId,
       isActive: true,
+      skills: skills ? JSON.parse(skills) : [], // Parse skills or default to empty array
     });
     await jobPost.save();
-    // Populate with 'name' to match GET endpoint
     await jobPost.populate('postedBy', 'name email companyName companyLogo');
-    console.log('Job post created:', jobPost._id);
+    console.log('Job post created:', { id: jobPost._id, skills: jobPost.skills });
     res.json({ message: 'Job post created successfully', jobPost });
   } catch (err) {
     console.error('Create job post error:', { message: err.message, stack: err.stack });
@@ -1182,6 +1198,11 @@ app.get('/api/admin/job-posts', authenticate, async (req, res) => {
       .populate('postedBy', 'name email companyName companyLogo')
       .lean();
     jobPosts.forEach((post) => {
+      console.log('Job post:', {
+        id: post._id,
+        title: post.title,
+        skills: post.skills || [], // Ensure skills is always an array
+      });
       if (!post.postedBy) {
         console.warn(`Job post ${post._id} has no postedBy reference`);
       } else if (!post.postedBy.companyName) {
@@ -1527,13 +1548,13 @@ app.post('/api/admin/forgot-password', async (req, res) => {
   // User: Get All Job Posts
 app.get('/api/jobs', async (req, res) => {
   try {
-const apiUrl = process.env.API_URL || 'https://jobportal-back-1jtg.onrender.com';
+    const apiUrl = process.env.API_URL || 'https://jobportal-back-1jtg.onrender.com';
 
     if (!process.env.API_URL) {
       console.warn('API_URL is not defined in environment variables, using fallback:', apiUrl);
     }
     const jobPosts = await JobPost.find({ isActive: true })
-      .select('title description location createdAt postedBy')
+      .select('title description location createdAt postedBy skills') // Include skills
       .populate({
         path: 'postedBy',
         select: 'companyName companyLogo',
@@ -1545,6 +1566,7 @@ const apiUrl = process.env.API_URL || 'https://jobportal-back-1jtg.onrender.com'
       description: job.description,
       location: job.location,
       createdAt: job.createdAt,
+      skills: Array.isArray(job.skills) ? job.skills : [], // Ensure skills is an array
       company: {
         name: job.postedBy?.companyName || 'Unknown Company',
         logo: job.postedBy?.companyLogo && mongoose.Types.ObjectId.isValid(job.postedBy.companyLogo)
