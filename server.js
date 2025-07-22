@@ -1751,17 +1751,24 @@ app.get('/api/jobs', async (req, res) => {
   }
 });
   // User: Get Applied Job Posts
-  app.get('/api/user/applications', authenticate, async (req, res) => {
-    try {
-      const applications = await Application.find({ userId: req.userId })
-        .populate('jobPostId', 'title description location');
-      console.log('Fetched user applications:', req.userId, 'Count:', applications.length);
-      res.json(applications);
-    } catch (err) {
-      console.error('Fetch user applications error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
-    }
-  });
+ app.get('/api/user/applications', authenticate, async (req, res) => {
+  try {
+    const applications = await Application.find({ userId: req.userId })
+      .populate({
+        path: 'jobPostId',
+        select: 'title description location',
+        match: { isActive: true }, // Only include applications for active job posts
+      })
+      .lean();
+    // Filter out applications where jobPostId is null (i.e., job post doesn't exist or isn't active)
+    const validApplications = applications.filter(app => app.jobPostId !== null);
+    console.log('Fetched user applications:', req.userId, 'Count:', validApplications.length);
+    res.json(validApplications);
+  } catch (err) {
+    console.error('Fetch user applications error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 } catch (err) {
   console.error('Error during route initialization:', {
     message: err.message,
