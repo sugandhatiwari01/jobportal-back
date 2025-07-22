@@ -175,6 +175,8 @@ const User = mongoose.model('User', userSchema);
 
 // Job Post Schema
 
+// Job Post Schema
+// Job Post Schema
 const jobPostSchema = new mongoose.Schema({
   title: { type: String, required: true },
   description: { type: String, required: true },
@@ -182,7 +184,14 @@ const jobPostSchema = new mongoose.Schema({
   postedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   isActive: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
-  skills: [{ type: String }], // Added skills field
+  skills: [{ type: String }],
+  workType: {
+    type: String,
+    required: true,
+    enum: ['Remote', 'Hybrid', 'Onsite'],
+    default: 'Remote', // Optional: set a default value
+  },
+screeningQuestions: [{ type: String }],
 });
 const JobPost = mongoose.model('JobPost', jobPostSchema);
 
@@ -192,6 +201,7 @@ const applicationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   jobPostId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPost', required: true },
   appliedAt: { type: Date, default: Date.now },
+  screeningAnswers: [{ type: String }], // Changed to an array of strings
 });
 const Application = mongoose.model('Application', applicationSchema);
 
@@ -475,64 +485,70 @@ app.post('/api/subscription/checkout', authenticate, async (req, res) => {
   });
 
   // Job Application Endpoint
-  app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
-    const jobPostId = req.params.id;
-    console.log('Job apply request:', { userId: req.userId, jobPostId });
+// Replace the existing /api/jobs/apply/:id endpoint
+app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
+  const jobPostId = req.params.id;
+  console.log('Job apply request:', { userId: req.userId, jobPostId });
 
-    try {
-      if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
-        console.warn('Invalid jobPostId format:', jobPostId);
-        return res.status(400).json({ message: 'Invalid job post ID format' });
-      }
-      const user = await User.findById(req.userId);
-      if (!user) return res.status(404).json({ message: 'User not found' });
-      if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
-      if (!user.cvFileId) return res.status(400).json({ message: 'Please upload a CV in your profile' });
-
-      const jobPost = await JobPost.findById(jobPostId);
-      if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
-      if (!jobPost.isActive) return res.status(400).json({ message: 'This job post is no longer accepting applications' });
-
-      const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
-      if (existingApplication) {
-        console.log('User already applied:', req.userId, jobPostId);
-        return res.status(400).json({ message: 'You have already applied to this job' });
-      }
-
-      const admin = await User.findById(jobPost.postedBy);
-      if (!admin) return res.status(404).json({ message: 'Admin not found' });
-      const subscription = await Subscription.findOne({ userId: admin._id });
-      if (!subscription) return res.status(400).json({ message: 'Admin has no active subscription' });
-
-      const applicationCount = await Application.countDocuments({ jobPostId });
-      if (applicationCount >= subscription.applicantLimit) {
-        jobPost.isActive = false;
-        await jobPost.save();
-        console.log('Job post deactivated due to applicant limit:', jobPostId);
-        return res.status(400).json({ message: 'Applicant limit reached for this job post' });
-      }
-
-      const application = new Application({
-        userId: req.userId,
-        jobPostId,
-      });
-      await application.save();
-
-      const newApplicationCount = await Application.countDocuments({ jobPostId });
-      if (newApplicationCount >= subscription.applicantLimit) {
-        jobPost.isActive = false;
-        await jobPost.save();
-        console.log('Job post deactivated after application:', jobPostId);
-      }
-
-      console.log('Application submitted:', application._id);
-      res.json({ message: 'Application submitted successfully' });
-    } catch (err) {
-      console.error('Apply error:', err.message);
-      res.status(500).json({ message: 'Server error', error: err.message });
+  try {
+    if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+      return res.status(400).json({ message: 'Invalid job post ID format' });
     }
-  });
+    const user = await User.findById(req.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user.verified) return res.status(400).json({ message: 'Email not verified' });
+    if (!user.cvFileId) return res.status(400).json({ message: 'Please upload a CV in your profile' });
 
+    const jobPost = await JobPost.findById(jobPostId);
+    if (!jobPost) return res.status(404).json({ message: 'Job post not found' });
+    if (!jobPost.isActive) return res.status(400).json({ message: 'This job post is no longer accepting applications' });
+
+    const existingApplication = await Application.findOne({ userId: req.userId, jobPostId });
+    if (existingApplication) {
+      return res.status(400).json({ message: 'You have already applied to this job' });
+    }
+
+    const admin = await User.findById(jobPost.postedBy);
+    if (!admin) return res.status(404).json({ message: 'Admin not found' });
+    const subscription = await Subscription.findOne({ userId: admin._id });
+    if (!subscription) return res.status(400).json({ message: 'Admin has no active subscription' });
+
+    const applicationCount = await Application.countDocuments({ jobPostId });
+    if (applicationCount >= subscription.applicantLimit) {
+      jobPost.isActive = false;
+      await jobPost.save();
+      return res.status(400).json({ message: 'Applicant limit reached for this job post' });
+    }
+
+    const { screeningAnswers } = req.body;
+    if (jobPost.screeningQuestions && jobPost.screeningQuestions.length > 0) {
+      if (!screeningAnswers || !Array.isArray(screeningAnswers) || screeningAnswers.length !== jobPost.screeningQuestions.length) {
+        return res.status(400).json({ message: 'Screening answers must be an array matching the number of questions' });
+      }
+      if (screeningAnswers.some(a => !a || a.trim().length < 1)) {
+        return res.status(400).json({ message: 'All screening answers must be non-empty strings' });
+      }
+    }
+
+    const application = new Application({
+      userId: req.userId,
+      jobPostId,
+      screeningAnswers: screeningAnswers || [], // Store as an array
+    });
+    await application.save();
+
+    const newApplicationCount = await Application.countDocuments({ jobPostId });
+    if (newApplicationCount >= subscription.applicantLimit) {
+      jobPost.isActive = false;
+      await jobPost.save();
+    }
+
+    res.json({ message: 'Application submitted successfully' });
+  } catch (err) {
+    console.error('Apply error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
   // Signup
   app.post('/api/signup', async (req, res) => {
     const { name, email, password } = req.body;
@@ -1034,7 +1050,114 @@ app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'co
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
+// Admin: Update Job Post
+// Admin: Update Job Post
+app.put('/api/admin/job-posts/:id', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  const jobPostId = req.params.id;
+  const { title, description, location, skills, screeningQuestions } = req.body;
+  console.log('Update job post request:', { userId: req.userId, jobPostId, title, location, skills, screeningQuestions });
 
+  if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+    console.warn('Invalid jobPostId format:', jobPostId);
+    return res.status(400).json({ message: 'Invalid job post ID format' });
+  }
+
+  const errors = {};
+  if (!validateJobPost(title, description, location)) {
+    errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
+  }
+  if (skills) {
+    try {
+      const parsedSkills = JSON.parse(skills);
+      if (!Array.isArray(parsedSkills) || parsedSkills.some(s => !s || s.trim().length < 2)) {
+        errors.skills = 'Skills must be an array of non-empty strings, each at least 2 characters';
+      }
+    } catch (err) {
+      errors.skills = 'Invalid skills format; must be a JSON array of strings';
+    }
+  }
+  if (screeningQuestions) {
+    try {
+      const parsedQuestions = JSON.parse(screeningQuestions);
+      if (!Array.isArray(parsedQuestions) || parsedQuestions.length > 5) {
+        errors.screeningQuestions = 'Screening questions must be an array with a maximum of 5 entries';
+      } else if (parsedQuestions.some(q => !q || q.trim().length < 1)) {
+        errors.screeningQuestions = 'Each screening question must be a non-empty string';
+      }
+    } catch (err) {
+      errors.screeningQuestions = 'Invalid screening questions format; must be a JSON array of strings';
+    }
+  }
+
+  if (Object.keys(errors).length > 0) {
+    console.log('Validation errors:', errors);
+    return res.status(400).json({ message: 'Validation failed', errors });
+  }
+
+  try {
+    const user = await User.findById(req.userId);
+    if (!user) {
+      console.warn('User not found:', req.userId);
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (!user.companyName || !user.companyLogo) {
+      console.warn('Incomplete admin profile for job update:', {
+        userId: req.userId,
+        companyName: !!user.companyName,
+        companyLogo: !!user.companyLogo,
+      });
+      return res.status(400).json({ message: 'Please complete your company profile (name and logo) before updating a job post' });
+    }
+
+    const jobPost = await JobPost.findOne({ _id: jobPostId, postedBy: req.userId });
+    if (!jobPost) {
+      console.warn('Job post not found or unauthorized:', { jobPostId, userId: req.userId });
+      return res.status(404).json({ message: 'Job post not found or you are not authorized to update it' });
+    }
+
+    jobPost.title = title.trim();
+    jobPost.description = description.trim();
+    jobPost.location = location.trim();
+    jobPost.skills = skills ? JSON.parse(skills) : jobPost.skills || [];
+    jobPost.screeningQuestions = screeningQuestions ? JSON.parse(screeningQuestions) : jobPost.screeningQuestions || [];
+
+    await jobPost.save();
+    await jobPost.populate('postedBy', 'name email companyName companyLogo');
+    console.log('Job post updated:', { id: jobPost._id, skills: jobPost.skills, screeningQuestions: jobPost.screeningQuestions });
+    res.json({ message: 'Job post updated successfully', jobPost });
+  } catch (err) {
+    console.error('Update job post error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+// Admin: Delete Job Post
+app.delete('/api/admin/job-posts/:id', authenticate, async (req, res) => {
+  if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
+  const jobPostId = req.params.id;
+  console.log('Delete job post request:', { userId: req.userId, jobPostId });
+
+  if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+    console.warn('Invalid jobPostId format:', jobPostId);
+    return res.status(400).json({ message: 'Invalid job post ID format' });
+  }
+
+  try {
+    const jobPost = await JobPost.findOneAndDelete({ _id: jobPostId, postedBy: req.userId });
+    if (!jobPost) {
+      console.warn('Job post not found or unauthorized:', { jobPostId, userId: req.userId });
+      return res.status(404).json({ message: 'Job post not found or you are not authorized to delete it' });
+    }
+
+    // Optionally, delete associated applications
+    await Application.deleteMany({ jobPostId });
+    console.log('Job post and associated applications deleted:', jobPostId);
+    res.json({ message: 'Job post deleted successfully' });
+  } catch (err) {
+    console.error('Delete job post error:', { message: err.message, stack: err.stack });
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 // Get Profile
 app.get('/api/profile', authenticate, async (req, res) => {
   try {
@@ -1049,7 +1172,35 @@ app.get('/api/profile', authenticate, async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
+// Add this new route for admins
+app.get('/api/admin/applications/:jobPostId', authenticate, async (req, res) => {
+  try {
+    if (!req.user.role === 'admin') {
+      return res.status(403).json({ message: 'Access denied. Admins only.' });
+    }
 
+    const jobPostId = req.params.jobPostId;
+    if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
+      return res.status(400).json({ message: 'Invalid job post ID format' });
+    }
+
+    const applications = await Application.find({ jobPostId }).populate('userId', 'email name');
+    if (!applications.length) {
+      return res.status(404).json({ message: 'No applications found for this job post' });
+    }
+
+    const response = applications.map(app => ({
+      user: app.userId,
+      screeningAnswers: app.screeningAnswers,
+      appliedAt: app.createdAt,
+    }));
+
+    res.json(response);
+  } catch (err) {
+    console.error('Admin fetch applications error:', err.message);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
 app.get('/api/company-logo/:fileId', async (req, res) => {
   try {
     const fileId = req.params.fileId;
@@ -1135,8 +1286,8 @@ app.get('/api/company-logo/:fileId', async (req, res) => {
   // Admin: Create Job Post
 app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-  const { title, description, location, skills } = req.body;
-  console.log('Create job post request:', { userId: req.userId, title, location, skills });
+  const { title, description, location, skills, screeningQuestions } = req.body;
+  console.log('Create job post request:', { userId: req.userId, title, location, skills, screeningQuestions });
 
   const errors = {};
   if (!validateJobPost(title, description, location)) {
@@ -1152,6 +1303,19 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       errors.skills = 'Invalid skills format; must be a JSON array of strings';
     }
   }
+  if (screeningQuestions) {
+    try {
+      const parsedQuestions = JSON.parse(screeningQuestions);
+      if (!Array.isArray(parsedQuestions) || parsedQuestions.length > 5) {
+        errors.screeningQuestions = 'Screening questions must be an array with a maximum of 5 entries';
+      } else if (parsedQuestions.some(q => !q || q.trim().length < 1)) {
+        errors.screeningQuestions = 'Each screening question must be a non-empty string';
+      }
+    } catch (err) {
+      errors.screeningQuestions = 'Invalid screening questions format; must be a JSON array of strings';
+    }
+  }
+
   if (Object.keys(errors).length > 0) {
     console.log('Validation errors:', errors);
     return res.status(400).json({ message: 'Validation failed', errors });
@@ -1178,11 +1342,12 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       location: location.trim(),
       postedBy: req.userId,
       isActive: true,
-      skills: skills ? JSON.parse(skills) : [], // Parse skills or default to empty array
+      skills: skills ? JSON.parse(skills) : [],
+      screeningQuestions: screeningQuestions ? JSON.parse(screeningQuestions) : [],
     });
     await jobPost.save();
     await jobPost.populate('postedBy', 'name email companyName companyLogo');
-    console.log('Job post created:', { id: jobPost._id, skills: jobPost.skills });
+    console.log('Job post created:', { id: jobPost._id, skills: jobPost.skills, screeningQuestions: jobPost.screeningQuestions });
     res.json({ message: 'Job post created successfully', jobPost });
   } catch (err) {
     console.error('Create job post error:', { message: err.message, stack: err.stack });
@@ -1201,7 +1366,9 @@ app.get('/api/admin/job-posts', authenticate, async (req, res) => {
       console.log('Job post:', {
         id: post._id,
         title: post.title,
-        skills: post.skills || [], // Ensure skills is always an array
+        skills: post.skills || [],
+        workType: post.workType || 'N/A', // Log workType
+        screeningQuestions: post.screeningQuestions || [], // Log screeningQuestions
       });
       if (!post.postedBy) {
         console.warn(`Job post ${post._id} has no postedBy reference`);
@@ -1554,7 +1721,7 @@ app.get('/api/jobs', async (req, res) => {
       console.warn('API_URL is not defined in environment variables, using fallback:', apiUrl);
     }
     const jobPosts = await JobPost.find({ isActive: true })
-      .select('title description location createdAt postedBy skills') // Include skills
+      .select('title description location createdAt postedBy skills workType screeningQuestions') // Add workType and screeningQuestions
       .populate({
         path: 'postedBy',
         select: 'companyName companyLogo',
@@ -1566,7 +1733,9 @@ app.get('/api/jobs', async (req, res) => {
       description: job.description,
       location: job.location,
       createdAt: job.createdAt,
-      skills: Array.isArray(job.skills) ? job.skills : [], // Ensure skills is an array
+      skills: Array.isArray(job.skills) ? job.skills : [],
+      workType: job.workType || 'Remote', // Fallback to 'Remote' if missing
+      screeningQuestions: Array.isArray(job.screeningQuestions) ? job.screeningQuestions : [], // Ensure array
       company: {
         name: job.postedBy?.companyName || 'Unknown Company',
         logo: job.postedBy?.companyLogo && mongoose.Types.ObjectId.isValid(job.postedBy.companyLogo)
