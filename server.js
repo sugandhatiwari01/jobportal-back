@@ -234,8 +234,11 @@ const validatePhone = (phone) => !phone || /^\+?\d{10,15}$/.test(phone);
 const validateState = (state) => state && usStates.includes(state);
 const validateCity = (city) => city && city.length >= 2;
 const validateHouseNoStreet = (houseNoStreet) => !houseNoStreet || houseNoStreet.length >= 5;
-const validateJobPost = (title, description, location) =>
-  title && title.length >= 3 && description && description.length >= 10 && location && location.length >= 2;
+const validateJobPost = (title, description, location, workType) =>
+  title && title.length >= 3 &&
+  description && description.length >= 10 &&
+  location && location.length >= 2 &&
+  workType && ['Remote', 'Hybrid', 'Onsite'].includes(workType);
 
 // Authentication Middleware
 const authenticate = async (req, res, next) => {
@@ -1055,8 +1058,8 @@ app.put('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'co
 app.put('/api/admin/job-posts/:id', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
   const jobPostId = req.params.id;
-  const { title, description, location, skills, screeningQuestions } = req.body;
-  console.log('Update job post request:', { userId: req.userId, jobPostId, title, location, skills, screeningQuestions });
+  const { title, description, location, skills, screeningQuestions, workType } = req.body;
+  console.log('Update job post request:', { userId: req.userId, jobPostId, title, location, skills, screeningQuestions, workType });
 
   if (!mongoose.Types.ObjectId.isValid(jobPostId)) {
     console.warn('Invalid jobPostId format:', jobPostId);
@@ -1064,8 +1067,8 @@ app.put('/api/admin/job-posts/:id', authenticate, async (req, res) => {
   }
 
   const errors = {};
-  if (!validateJobPost(title, description, location)) {
-    errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
+  if (!validateJobPost(title, description, location, workType)) {
+    errors.jobPost = 'Title (3+ chars), description (10+ chars), location (2+ chars), and valid workType (Remote, Hybrid, Onsite) are required';
   }
   if (skills) {
     try {
@@ -1121,10 +1124,10 @@ app.put('/api/admin/job-posts/:id', authenticate, async (req, res) => {
     jobPost.location = location.trim();
     jobPost.skills = skills ? JSON.parse(skills) : jobPost.skills || [];
     jobPost.screeningQuestions = screeningQuestions ? JSON.parse(screeningQuestions) : jobPost.screeningQuestions || [];
-
+    jobPost.workType = workType.trim(); // Update workType
     await jobPost.save();
     await jobPost.populate('postedBy', 'name email companyName companyLogo');
-    console.log('Job post updated:', { id: jobPost._id, skills: jobPost.skills, screeningQuestions: jobPost.screeningQuestions });
+    console.log('Job post updated:', { id: jobPost._id, skills: jobPost.skills, screeningQuestions: jobPost.screeningQuestions, workType: jobPost.workType });
     res.json({ message: 'Job post updated successfully', jobPost });
   } catch (err) {
     console.error('Update job post error:', { message: err.message, stack: err.stack });
@@ -1286,12 +1289,12 @@ app.get('/api/company-logo/:fileId', async (req, res) => {
   // Admin: Create Job Post
 app.post('/api/admin/job-posts', authenticate, async (req, res) => {
   if (!req.isAdmin) return res.status(403).json({ message: 'Unauthorized' });
-  const { title, description, location, skills, screeningQuestions } = req.body;
-  console.log('Create job post request:', { userId: req.userId, title, location, skills, screeningQuestions });
+  const { title, description, location, skills, screeningQuestions, workType } = req.body;
+  console.log('Create job post request:', { userId: req.userId, title, location, skills, screeningQuestions, workType });
 
   const errors = {};
-  if (!validateJobPost(title, description, location)) {
-    errors.jobPost = 'Title (3+ chars), description (10+ chars), and location (2+ chars) are required';
+  if (!validateJobPost(title, description, location, workType)) {
+    errors.jobPost = 'Title (3+ chars), description (10+ chars), location (2+ chars), and valid workType (Remote, Hybrid, Onsite) are required';
   }
   if (skills) {
     try {
@@ -1344,10 +1347,11 @@ app.post('/api/admin/job-posts', authenticate, async (req, res) => {
       isActive: true,
       skills: skills ? JSON.parse(skills) : [],
       screeningQuestions: screeningQuestions ? JSON.parse(screeningQuestions) : [],
+      workType: workType.trim(), // Ensure workType is set
     });
     await jobPost.save();
     await jobPost.populate('postedBy', 'name email companyName companyLogo');
-    console.log('Job post created:', { id: jobPost._id, skills: jobPost.skills, screeningQuestions: jobPost.screeningQuestions });
+    console.log('Job post created:', { id: jobPost._id, skills: jobPost.skills, screeningQuestions: jobPost.screeningQuestions, workType: jobPost.workType });
     res.json({ message: 'Job post created successfully', jobPost });
   } catch (err) {
     console.error('Create job post error:', { message: err.message, stack: err.stack });
