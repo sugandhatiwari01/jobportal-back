@@ -1556,16 +1556,16 @@ app.post('/api/forgot-password', async (req, res) => {
       await transporter.sendMail({
         from: `"Centennial Infotech" <${process.env.EMAIL_USER}>`,
         to: email.trim().toLowerCase(),
-        subject: 'Password Reset Request - Centenniak Infotech',
+        subject: 'Password Reset Request - Centennial Infotech',
         html: `
           <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f4f4f4; border-radius: 8px;">
             <div style="text-align: center; margin-bottom: 20px;">
-              <h1 style="color: #1a202c; font-size: 24px; font-weight: bold;">Centenniak Infotech</h1>
+              <h1 style="color: #1a202c; font-size: 24px; font-weight: bold;">Centennial Infotech</h1>
             </div>
             <div style="background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
               <h2 style="color: #2b6cb0; font-size: 20px; text-align: center; margin-bottom: 20px;">Password Reset Request</h2>
               <p style="color: #4a5568; font-size: 16px; margin-bottom: 20px;">
-                You have requested a password reset for your Centenniak Infotech account. Click the button below to proceed.
+                You have requested a password reset for your Centennial Infotech account. Click the button below to proceed.
               </p>
               <div style="text-align: center; margin-bottom: 20px;">
                 <a href="${resetUrl}" style="display: inline-block; padding: 12px 24px; background-color: #2b6cb0; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: bold;">
@@ -1577,7 +1577,7 @@ app.post('/api/forgot-password', async (req, res) => {
               </p>
             </div>
             <p style="color: #718096; font-size: 12px; text-align: center; margin-top: 20px;">
-              © ${new Date().getFullYear()} Centenniak Infotech. All rights reserved.
+              © ${new Date().getFullYear()} Centennial Infotech. All rights reserved.
             </p>
           </div>
         `,
@@ -1676,8 +1676,8 @@ app.post('/api/forgot-password', async (req, res) => {
       });
       res.status(500).json({ message: 'Server error', error: err.message });
     }
-  });
-  // Admin Forgot Password Endpoint
+});
+
 app.post('/api/admin/forgot-password', async (req, res) => {
   const { email } = req.body;
   console.log('Forgot password request (admin):', { email });
@@ -1718,12 +1718,33 @@ app.post('/api/admin/forgot-password', async (req, res) => {
     console.log('Sending reset email to:', email, 'with URL:', resetUrl);
 
     await transporter.sendMail({
-      from: `"Job Portal" <${process.env.EMAIL_USER}>`,
+      from: `"Centennial Infotech" <${process.env.EMAIL_USER}>`,
       to: email.trim().toLowerCase(),
-      subject: 'Admin Password Reset Request',
-      text: `You are receiving this email because you (or someone else) requested a password reset for your admin account.\n\n` +
-            `Please click the following link to reset your password:\n${resetUrl}\n\n` +
-            `This link will expire in 1 hour. If you did not request a password reset, please ignore this email.\n`,
+      subject: 'Admin Password Reset Request - Centennial Infotech',
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f4f4f4; border-radius: 8px;">
+          <div style="text-align: center; margin-bottom: 20px;">
+            <h1 style="color: #1a202c; font-size: 24px; font-weight: bold;">Centennial Infotech</h1>
+          </div>
+          <div style="background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+            <h2 style="color: #2b6cb0; font-size: 20px; text-align: center; margin-bottom: 20px;">Admin Password Reset Request</h2>
+            <p style="color: #4a5568; font-size: 16px; margin-bottom: 20px;">
+              You have requested a password reset for your Centennial Infotech admin account. Click the button below to proceed.
+            </p>
+            <div style="text-align: center; margin-bottom: 20px;">
+              <a href="${resetUrl}" style="display: inline-block; padding: 12px 24px; background-color: #2b6cb0; color: #ffffff; text-decoration: none; border-radius: 6px; font-size: 16px; font-weight: bold;">
+                Reset Your Password
+              </a>
+            </div>
+            <p style="color: #4a5568; font-size: 14px; text-align: center;">
+              This link will expire in 1 hour. If you did not request a password reset, please ignore this email or contact support.
+            </p>
+          </div>
+          <p style="color: #718096; font-size: 12px; text-align: center; margin-top: 20px;">
+            © ${new Date().getFullYear()} Centennial Infotech. All rights reserved.
+          </p>
+        </div>
+      `,
     });
 
     console.log('Reset email sent successfully');
