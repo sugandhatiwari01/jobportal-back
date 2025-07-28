@@ -241,23 +241,30 @@ const validateJobPost = (title, description, location, workType) =>
   workType && ['Remote', 'Hybrid', 'Onsite'].includes(workType);
 
 // Authentication Middleware
+// Authentication Middleware
 const authenticate = async (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ message: 'No token provided' });
+  if (!token) {
+    const redirectTo = req.originalUrl.startsWith('/api/admin') ? '/admin/login' : '/login';
+    return res.status(401).json({ message: 'No token provided', redirectTo });
+  }
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.userId = decoded.userId;
     const user = await User.findById(req.userId);
-    if (!user) return res.status(401).json({ message: 'User not found' });
+    if (!user) {
+      const redirectTo = req.originalUrl.startsWith('/api/admin') ? '/admin/login' : '/login';
+      return res.status(401).json({ message: 'User not found', redirectTo });
+    }
     req.isAdmin = user.isAdmin;
     next();
   } catch (err) {
     console.error('Auth error:', err.message);
-    res.status(401).json({ message: 'Invalid token' });
+    const redirectTo = req.originalUrl.startsWith('/api/admin') ? '/admin/login' : '/login';
+    res.status(401).json({ message: 'Invalid token', redirectTo });
   }
 };
-
 // Routes
 try {
   // Update the /api/subscription/current endpoint
