@@ -715,7 +715,7 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
   });
 
   // Login
-  app.post('/api/login', async (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { email, password } = req.body;
   console.log('Login request:', { email });
 
@@ -746,7 +746,12 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
       { expiresIn: '24h' }
     );
     console.log('Login successful:', { userId: user._id });
-    res.json({ token, isAdmin: user.isAdmin });
+    res.json({
+      token,
+      userId: user._id,
+      isAdmin: user.isAdmin,
+      profile: { phone: user.phone || null } // Include phone in profile
+    });
   } catch (err) {
     console.error('Login error:', { message: err.message, stack: err.stack });
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -754,7 +759,7 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
 });
 
   // Admin Login
-  app.post('/api/admin/login', async (req, res) => {
+app.post('/api/admin/login', async (req, res) => {
   const { email, password } = req.body;
   console.log('Admin login request:', { email });
   try {
@@ -794,7 +799,13 @@ app.post('/api/jobs/apply/:id', authenticate, async (req, res) => {
       { expiresIn: '24h' }
     );
     console.log('Admin login successful:', user._id);
-    res.json({ token, userId: user._id, isAdmin: user.isAdmin, loginType: 'admin' });
+    res.json({
+      token,
+      userId: user._id,
+      isAdmin: user.isAdmin,
+      loginType: 'admin',
+      profile: { phone: user.phone || null } // Include phone in profile
+    });
   } catch (err) {
     console.error('Admin login error:', { message: err.message, stack: err.stack });
     res.status(500).json({ message: 'Server error during login', error: err.message || 'Unknown error' });
