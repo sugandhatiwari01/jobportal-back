@@ -804,7 +804,7 @@ app.post('/api/admin/login', async (req, res) => {
       userId: user._id,
       isAdmin: user.isAdmin,
       loginType: 'admin',
-      profile: { phone: user.phone || null } // Include phone in profile
+      profile: { phone: user.companyPhone || null } // Include phone in profile
     });
   } catch (err) {
     console.error('Admin login error:', { message: err.message, stack: err.stack });
