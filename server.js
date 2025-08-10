@@ -11,7 +11,8 @@ const paypal = require('paypal-rest-sdk');
 const QRCode = require('qrcode');
 const path = require('path');
 const crypto = require('crypto');
-
+const cron = require('node-cron');
+const Schema = mongoose.Schema;
 const app = express();
 
 paypal.configure({
@@ -205,6 +206,17 @@ const applicationSchema = new mongoose.Schema({
 });
 const Application = mongoose.model('Application', applicationSchema);
 
+
+
+const notificationSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  jobId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobPost', required: true },
+  message: { type: String, required: true },
+  isRead: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Notification = mongoose.model('Notification', notificationSchema);
 // US States
 const usStates = [
   'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado', 'Connecticut', 'Delaware',
@@ -265,6 +277,233 @@ const authenticate = async (req, res, next) => {
     res.status(401).json({ message: 'Invalid token', redirectTo });
   }
 };
+// Notification System
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// Function to match jobs based on user skills or select random jobs
+async function getJobRecommendations(user) {
+  let jobs;
+  if (user.skills && user.skills.length > 0) {
+    jobs = await JobPost.find({
+      skills: { $in: user.skills },
+      isActive: true,
+    })
+      .populate('postedBy', 'companyName companyLogo')
+      .limit(2);
+  } else {
+    jobs = await JobPost.aggregate([
+      { $match: { isActive: true } },
+      { $sample: { size: 2 } },
+    ]);
+    jobs = await JobPost.populate(jobs, { path: 'postedBy', select: 'companyName companyLogo' });
+  }
+  return jobs;
+}
+
+// Function to send email with job recommendations
+async function sendJobRecommendationEmail(user, jobs) {
+  const apiUrl = process.env.API_URL || 'https://jobportal-back-1jtg.onrender.com';
+  const frontendUrl = process.env.FRONTEND_URL || 'https://jobportal-front-beta.vercel.app';
+  const jobList = jobs.map(job => `
+    <li style="padding: 15px; border-bottom: 1px solid #e2e8f0; margin-bottom: 15px; display: flex; align-items: flex-start;">
+      ${
+        job.postedBy?.companyLogo && mongoose.Types.ObjectId.isValid(job.postedBy.companyLogo)
+          ? `
+            <img
+              src="${apiUrl}/api/company-logo/${job.postedBy.companyLogo}"
+              alt="${job.postedBy.companyName} Logo"
+              style="width: 40px; height: 40px; object-fit: contain; margin-right: 15px; border-radius: 4px;"
+              onerror="this.style.display='none';"
+            />
+          `
+          : ''
+      }
+      <div>
+        <strong style="color: #2d3748; font-size: 16px; display: block; margin-bottom: 5px;">${job.title} at ${job.postedBy?.companyName || 'Unknown Company'}</strong>
+        <p style="color: #4a5568; font-size: 14px; margin: 0;">
+          Location: ${job.location} | Type: ${job.workType}
+        </p>
+        <p style="color: #4a5568; font-size: 14px; margin: 5px 0 0;">
+          Skills: ${Array.isArray(job.skills) ? job.skills.join(', ') : 'None'}
+        </p>
+        <a
+          href="${frontendUrl}/jobs?search=${encodeURIComponent(job.title)}&jobId=${job._id}"
+          style="display: inline-block; margin-top: 10px; color: #2b6cb0; font-size: 14px; text-decoration: none; font-weight: 600;"
+        >
+          View Job
+        </a>
+      </div>
+    </li>
+  `).join('');
+
+  const mailOptions = {
+    from: `"Centennial Infotech" <${process.env.EMAIL_USER}>`,
+    to: user.email,
+    subject: 'New Job Recommendations for You',
+    html: `
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Job Recommendations</title>
+        <style type="text/css">
+          @media only screen and (max-width: 600px) {
+            table[width="700"] { width: 100% !important; }
+            img[src*="logo"] { max-width: 150px !important; }
+            img[src*="company-logo"] { width: 30px !important; height: 30px !important; }
+            h1 { font-size: 24px !important; }
+            h2 { font-size: 20px !important; }
+            a[style*="padding: 14px 30px"] { padding: 12px 20px !important; font-size: 14px !important; }
+          }
+        </style>
+      </head>
+      <body style="margin: 0; padding: 0; background-color: #e2e8f0; font-family: 'Arial', sans-serif;">
+        <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color: #e2e8f0;">
+          <tr>
+            <td align="center" style="padding: 20px 0;">
+              <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="700" style="max-width: 700px; background-color: #ffffff; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
+                <tr>
+                  <td style="padding: 30px 20px 20px; text-align: center;">
+                    <img
+                      src="${apiUrl}/logo.webp"
+                      alt="Centennial Infotech Logo"
+                      style="max-width: 200px; height: auto; display: block; margin: 0 auto;"
+                      onerror="this.style.display='none';"
+                    />
+                    <h1 style="color: #1a202c; font-size: 28px; font-weight: bold; margin: 20px 0 10px;">Centennial Infotech</h1>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 20px 30px;">
+                    <h2 style="color: #2b6cb0; font-size: 24px; text-align: center; margin: 0 0 20px; font-weight: 600;">Job Recommendations</h2>
+                    <p style="color: #4a5568; font-size: 16px; line-height: 24px; margin: 0 0 25px; text-align: center;">
+                      Hello ${user.name},<br>
+                      We've curated two exciting job opportunities that align with your skills and interests:
+                    </p>
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="margin-bottom: 30px;">
+                      <tr>
+                        <td>
+                          <ul style="list-style: none; padding: 0; margin: 0;">
+                            ${jobList}
+                          </ul>
+                        </td>
+                      </tr>
+                    </table>
+                    <table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%">
+                      <tr>
+                        <td align="center">
+                          <a
+                            href="${frontendUrl}/jobs"
+                            style="display: inline-block; padding: 14px 30px; background-color: #2b6cb0; color: #ffffff; font-size: 16px; font-weight: 600; text-decoration: none; border-radius: 6px; transition: background-color 0.3s;"
+                            onMouseOver="this.style.backgroundColor='#1a4971'"
+                            onMouseOut="this.style.backgroundColor='#2b6cb0'"
+                          >
+                            Explore Jobs Now
+                          </a>
+                        </td>
+                      </tr>
+                    </table>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding: 20px 30px; text-align: center; background-color: #f7fafc; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;">
+                    <p style="color: #718096; font-size: 14px; margin: 0;">
+                      Need help? <a href="mailto:support@centennialinfotech.com" style="color: #2b6cb0; text-decoration: none;">Contact Support</a>
+                    </p>
+                    <p style="color: #718096; font-size: 14px; margin: 10px 0 0;">
+                      © ${new Date().getFullYear()} Centennial Infotech. All rights reserved.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+      </html>
+    `,
+  };
+
+  await transporter.sendMail(mailOptions);
+  console.log('Recommendation email sent to:', user.email);
+}
+// Function to save notifications to database
+async function saveNotifications(user, jobs) {
+  try {
+    const existingNotifications = await Notification.find({
+      userId: user._id,
+      jobId: { $in: jobs.map(job => job._id) },
+      createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } // Avoid duplicates within 24 hours
+    });
+    const existingJobIds = existingNotifications.map(n => n.jobId.toString());
+    const newJobs = jobs.filter(job => !existingJobIds.includes(job._id.toString()));
+    if (newJobs.length === 0) {
+      console.log('No new notifications to save for:', user.email);
+      return;
+    }
+    const notifications = newJobs.map(job => ({
+      userId: user._id,
+      message: `New job recommendation: ${job.title} at ${job.postedBy.companyName}`,
+      jobId: job._id,
+      isRead: false,
+      createdAt: new Date(),
+    }));
+    await Notification.insertMany(notifications);
+    console.log('Notifications saved for:', user.email, 'Count:', notifications.length);
+  } catch (error) {
+    console.error('Error saving notifications:', { message: error.message, userId: user._id });
+    throw error;
+  }
+}
+
+// Schedule job recommendations (runs daily at 9 AM)
+cron.schedule('* * * * *', async () => {
+  console.log('Cron job started at:', new Date().toISOString());
+  try {
+    // Cleanup notifications older than 7 days
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const deleted = await Notification.deleteMany({ createdAt: { $lt: sevenDaysAgo } });
+    console.log('Deleted old notifications:', { count: deleted.deletedCount });
+
+    // Generate new notifications and emails
+    const users = await User.find({ verified: true, isAdmin: false });
+    console.log('Found verified non-admin users:', users.length);
+    for (const user of users) {
+      console.log('Processing user:', user.email, 'Skills:', user.skills || 'None');
+      const jobs = await getJobRecommendations(user);
+      console.log('Recommended jobs for user:', user.email, 'Count:', jobs.length);
+      if (jobs.length > 0) {
+        console.log('Jobs found:', jobs.map(j => ({ id: j._id, title: j.title })));
+        try {
+          await sendJobRecommendationEmail(user, jobs);
+          console.log('Email sent successfully for:', user.email);
+          await saveNotifications(user, jobs);
+          console.log('Notifications saved for:', user.email);
+        } catch (emailOrSaveError) {
+          console.error('Error processing user:', user.email, {
+            message: emailOrSaveError.message,
+            stack: emailOrSaveError.stack,
+          });
+        }
+      } else {
+        console.log('No jobs found for user:', user.email);
+      }
+    }
+    console.log('Cron job completed successfully');
+  } catch (error) {
+    console.error('Cron job error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+  }
+});
 // Routes
 try {
   // Update the /api/subscription/current endpoint
@@ -927,6 +1166,116 @@ app.post('/api/profile', authenticate, upload.fields([{ name: 'cv' }, { name: 'c
   } catch (err) {
     console.error('Profile update error:', { message: err.message, stack: err.stack });
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+app.post('/api/test-notifications', async (req, res) => {
+  try {
+    const users = await User.find({ verified: true, isAdmin: false });
+    for (const user of users) {
+      const jobs = await getJobRecommendations(user);
+      if (jobs.length > 0) {
+        await saveNotifications(user, jobs);
+        await sendJobRecommendationEmail(user, jobs);
+      }
+    }
+    console.log('Test notifications generated');
+    res.json({ message: 'Test notifications generated' });
+  } catch (error) {
+    console.error('Test notifications error:', error);
+    res.status(500).json({ message: 'Error generating test notifications' });
+  }
+});
+app.post('/api/test-email', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!validateEmail(email)) {
+      return res.status(400).json({ message: 'Invalid email format' });
+    }
+    await transporter.sendMail({
+      from: `"Centennial Infotech" <${process.env.EMAIL_USER}>`,
+      to: email.trim().toLowerCase(),
+      subject: 'Test Email',
+      text: 'This is a test email from Centennial Infotech.',
+    });
+    console.log('Test email sent to:', email);
+    res.json({ message: 'Test email sent successfully' });
+  } catch (error) {
+    console.error('Test email error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ message: 'Error sending test email', error: error.message });
+  }
+});
+// Notification Routes
+app.get('/api/notifications', authenticate, async (req, res) => {
+  try {
+    const notifications = await Notification.find({ userId: req.userId })
+      .populate({
+        path: 'jobId',
+        select: 'title description skills workType location postedBy',
+        populate: {
+          path: 'postedBy',
+          select: 'companyName companyLogo',
+        },
+      })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const transformedNotifications = notifications.map(notification => ({
+      ...notification,
+      jobId: notification.jobId
+        ? {
+            _id: notification.jobId._id,
+            title: notification.jobId.title,
+            description: notification.jobId.description,
+            skills: Array.isArray(notification.jobId.skills) ? notification.jobId.skills : [],
+            workType: notification.jobId.workType || 'Remote',
+            location: notification.jobId.location,
+            companyName: notification.jobId.postedBy?.companyName || 'Unknown Company',
+            companyLogo: notification.jobId.postedBy?.companyLogo
+              ? `${process.env.API_URL || 'http://localhost:5000'}/api/company-logo/${notification.jobId.postedBy.companyLogo}`
+              : null,
+          }
+        : null,
+    }));
+
+    console.log('Fetched notifications for user:', req.userId, 'Count:', transformedNotifications.length);
+    res.json(transformedNotifications);
+  } catch (error) {
+    console.error('Get notifications error:', {
+      message: error.message,
+      stack: error.stack,
+      userId: req.userId,
+    });
+    res.status(500).json({ message: 'Error fetching notifications', error: error.message });
+  }
+});
+
+app.put('/api/notifications/:notificationId/read', authenticate, async (req, res) => {
+  try {
+    const { notificationId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(notificationId)) {
+      console.warn('Invalid notificationId format:', notificationId);
+      return res.status(400).json({ message: 'Invalid notification ID format' });
+    }
+    const notification = await Notification.findOneAndUpdate(
+      { _id: notificationId, userId: req.userId },
+      { isRead: true },
+      { new: true }
+    );
+    if (!notification) {
+      console.warn('Notification not found or unauthorized:', { notificationId, userId: req.userId });
+      return res.status(404).json({ message: 'Notification not found or unauthorized' });
+    }
+    console.log('Notification marked as read:', notificationId);
+    res.json({ message: 'Notification marked as read' });
+  } catch (error) {
+    console.error('Mark notification read error:', {
+      message: error.message,
+      stack: error.stack,
+    });
+    res.status(500).json({ message: 'Error marking notification', error: error.message });
   }
 });
 // Add PUT route for profile updates
