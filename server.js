@@ -372,7 +372,7 @@ async function sendJobRecommendationEmail(user, jobs) {
                 <tr>
                   <td style="padding: 30px 20px 20px; text-align: center;">
                     <img
-                      src="${apiUrl}/logo.webp"
+                      src="/logo.webp"
                       alt="Centennial Infotech Logo"
                       style="max-width: 200px; height: auto; display: block; margin: 0 auto;"
                       onerror="this.style.display='none';"
@@ -464,7 +464,7 @@ async function saveNotifications(user, jobs) {
 }
 
 // Schedule job recommendations (runs daily at 9 AM)
-cron.schedule('* * * * *', async () => {
+cron.schedule('0 9 * * *', async () => {
   console.log('Cron job started at:', new Date().toISOString());
   try {
     // Cleanup notifications older than 7 days
